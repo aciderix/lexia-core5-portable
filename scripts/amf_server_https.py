@@ -337,7 +337,8 @@ def build_acknowledge_message(correlation_id, body_value=None):
 
 def build_amf_response(target_uri, response_uri, amf3_value, version=3):
     """Build AMF response packet.
-    AMF response: target = response_uri + "/onResult", response = empty string
+    Try pure AMF3 body (no AMF0 wrapper) when version=3.
+    For version 0, use AMF0 strict array + 0x11 switch.
     """
     packet = struct.pack(">H", version)
     packet += struct.pack(">H", 0)
@@ -351,8 +352,13 @@ def build_amf_response(target_uri, response_uri, amf3_value, version=3):
     # Response URI = empty
     packet += struct.pack(">H", 0)
     
-    # Body: AMF0 strict array + AMF3 switch
-    body_data = bytes([0x0A]) + struct.pack(">I", 1) + bytes([0x11]) + amf3_value
+    if version == 3:
+        # Pure AMF3 body (no AMF0 wrapper, no 0x11 switch)
+        body_data = amf3_value
+    else:
+        # AMF0 strict array + AMF3 switch (traditional AMFPHP)
+        body_data = bytes([0x0A]) + struct.pack(">I", 1) + bytes([0x11]) + amf3_value
+    
     packet += struct.pack(">I", len(body_data))
     packet += body_data
     
