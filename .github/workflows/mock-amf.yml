@@ -1,0 +1,807 @@
+name: Mock AMF Server Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Lexia installer
+        id: cache-installer
+        uses: actions/cache@v4
+        with:
+          path: lexia-installer.exe
+          key: lexia-installer-v1.0
+
+      - name: Download Lexia Core5 installer from release
+        if: steps.cache-installer.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $apiUrl = "https://api.github.com/repos/aciderix/lexia-core5-portable/releases/assets/508863891"
+          $headers = @{
+            "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
+            "Accept" = "application/octet-stream"
+          }
+          Invoke-WebRequest -Uri $apiUrl -OutFile "lexia-installer.exe" -Headers $headers
+
+      - name: Check if already installed
+        id: check-install
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") {
+            echo "installed=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "installed=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Install Lexia Core5 silently
+        if: steps.check-install.outputs.installed != 'true'
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -PassThru
+          Write-Host "Installer exit code: $($proc.ExitCode)"
+          Start-Sleep -Seconds 15
+
+      - name: Upload complete PortalDesktop.swf
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortalDesktop-swf
+          path: "C:\\Program Files (x86)\\Lexia Core5\\PortalDesktop.swf"
+          retention-days: 30
+
+      - name: Upload application.xml
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-xml
+          path: "C:\\Program Files (x86)\\Lexia Core5\\META-INF\\AIR\\application.xml"
+          retention-days: 30
+
+      - name: Install Python pyamf
+        shell: pwsh
+        run: |
+          pip install pyamf 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "pyamf not available, will use custom AMF handler"
+            pip install flask 2>&1
+          }
+
+      - name: Create mock AMF gateway server
+        shell: pwsh
+        run: |
+          # Create a Python mock AMF gateway
+          $serverCode = @'
+import struct
+import sys
+import os
+import json
+import binascii
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import ssl
+import traceback
+
+# AMF0 markers
+AMF0_NUMBER = 0x00
+AMF0_BOOLEAN = 0x01
+AMF0_STRING = 0x02
+AMF0_OBJECT = 0x03
+AMF0_NULL = 0x05
+AMF0_UNDEFINED = 0x06
+AMF0_REFERENCE = 0x07
+AMF0_ECMA_ARRAY = 0x08
+AMF0_OBJECT_END = 0x09
+AMF0_STRICT_ARRAY = 0x0A
+AMF0_DATE = 0x0B
+AMF0_LONG_STRING = 0x0C
+AMF0_XML = 0x0F
+AMF0_TYPED_OBJECT = 0x10
+AMF0_AMF3 = 0x11
+
+# AMF3 markers
+AMF3_UNDEFINED = 0x00
+AMF3_NULL = 0x01
+AMF3_FALSE = 0x02
+AMF3_TRUE = 0x03
+AMF3_INTEGER = 0x04
+AMF3_DOUBLE = 0x05
+AMF3_STRING = 0x06
+AMF3_XML = 0x07
+AMF3_DATE = 0x08
+AMF3_ARRAY = 0x09
+AMF3_OBJECT = 0x0A
+AMF3_XML_STRING = 0x0B
+AMF3_BYTE_ARRAY = 0x0C
+
+class AMFReader:
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+        self.strings = []
+        self.objects = []
+    
+    def read_byte(self):
+        b = self.data[self.pos]
+        self.pos += 1
+        return b
+    
+    def read_short(self):
+        v = struct.unpack('>H', self.data[self.pos:self.pos+2])[0]
+        self.pos += 2
+        return v
+    
+    def read_long(self):
+        v = struct.unpack('>I', self.data[self.pos:self.pos+4])[0]
+        self.pos += 4
+        return v
+    
+    def read_double(self):
+        v = struct.unpack('>d', self.data[self.pos:self.pos+8])[0]
+        self.pos += 8
+        return v
+    
+    def read_utf8(self):
+        length = self.read_short()
+        s = self.data[self.pos:self.pos+length].decode('utf-8', errors='replace')
+        self.pos += length
+        return s
+    
+    def read_long_utf8(self):
+        length = self.read_long()
+        s = self.data[self.pos:self.pos+length].decode('utf-8', errors='replace')
+        self.pos += length
+        return s
+    
+    def read_u29(self):
+        result = 0
+        for i in range(3):
+            b = self.read_byte()
+            result = (result << 7) | (b & 0x7F)
+            if not (b & 0x80):
+                return result
+        b = self.read_byte()
+        result = (result << 8) | b
+        return result
+    
+    def read_amf0(self):
+        marker = self.read_byte()
+        return self.read_amf0_value(marker)
+    
+    def read_amf0_value(self, marker):
+        if marker == AMF0_NUMBER:
+            return self.read_double()
+        elif marker == AMF0_BOOLEAN:
+            return self.read_byte() != 0
+        elif marker == AMF0_STRING:
+            return self.read_utf8()
+        elif marker == AMF0_OBJECT:
+            obj = {}
+            while True:
+                key = self.read_utf8()
+                if key == '':
+                    self.pos += 1  # skip object end marker
+                    break
+                val = self.read_amf0()
+                obj[key] = val
+            return obj
+        elif marker == AMF0_NULL:
+            return None
+        elif marker == AMF0_UNDEFINED:
+            return None
+        elif marker == AMF0_ECMA_ARRAY:
+            count = self.read_long()
+            obj = {}
+            while True:
+                key = self.read_utf8()
+                if key == '':
+                    self.pos += 1
+                    break
+                val = self.read_amf0()
+                obj[key] = val
+            return obj
+        elif marker == AMF0_STRICT_ARRAY:
+            count = self.read_long()
+            arr = []
+            for _ in range(count):
+                arr.append(self.read_amf0())
+            return arr
+        elif marker == AMF0_DATE:
+            self.read_double()
+            return None
+        elif marker == AMF0_TYPED_OBJECT:
+            class_name = self.read_utf8()
+            obj = {'_class': class_name}
+            while True:
+                key = self.read_utf8()
+                if key == '':
+                    self.pos += 1
+                    break
+                val = self.read_amf0()
+                obj[key] = val
+            return obj
+        elif marker == AMF0_LONG_STRING:
+            return self.read_long_utf8()
+        elif marker == AMF0_AMF3:
+            return self.read_amf3()
+        else:
+            return f"<unknown marker 0x{marker:02x}>"
+    
+    def read_amf3(self):
+        marker = self.read_byte()
+        return self.read_amf3_value(marker)
+    
+    def read_amf3_value(self, marker):
+        if marker == AMF3_UNDEFINED or marker == AMF3_NULL:
+            return None
+        elif marker == AMF3_FALSE:
+            return False
+        elif marker == AMF3_TRUE:
+            return True
+        elif marker == AMF3_INTEGER:
+            return self.read_u29()
+        elif marker == AMF3_DOUBLE:
+            return self.read_double()
+        elif marker == AMF3_STRING:
+            ref = self.read_u29()
+            if ref & 1:
+                length = ref >> 1
+                s = self.data[self.pos:self.pos+length].decode('utf-8', errors='replace')
+                self.pos += length
+                self.strings.append(s)
+                return s
+            else:
+                idx = ref >> 1
+                return self.strings[idx] if idx < len(self.strings) else f"<str ref {idx}>"
+        elif marker == AMF3_ARRAY:
+            ref = self.read_u29()
+            if ref & 1:
+                # dense portion
+                count = ref >> 1
+                arr = []
+                # Read associative keys
+                while True:
+                    key_ref = self.read_u29()
+                    if key_ref & 1:
+                        key_len = key_ref >> 1
+                        key = self.data[self.pos:self.pos+key_len].decode('utf-8', errors='replace')
+                        self.pos += key_len
+                        if key == '':
+                            break
+                        val = self.read_amf3(self.read_byte())
+                        arr.append({key: val})
+                    else:
+                        break
+                # Read dense elements
+                for _ in range(count):
+                    arr.append(self.read_amf3(self.read_byte()))
+                return arr
+            else:
+                idx = ref >> 1
+                return f"<arr ref {idx}>"
+        elif marker == AMF3_OBJECT:
+            ref = self.read_u29()
+            if not (ref & 1):
+                return f"<obj ref {ref >> 1}>"
+            
+            traits_ref = ref >> 1
+            if traits_ref & 1:
+                # New traits
+                class_name_ref = self.read_u29()
+                if class_name_ref & 1:
+                    class_name_len = class_name_ref >> 1
+                    class_name = self.data[self.pos:self.pos+class_name_len].decode('utf-8', errors='replace')
+                    self.pos += class_name_len
+                else:
+                    class_name = f"<class ref {class_name_ref >> 1}>"
+                
+                externalized = (traits_ref >> 1) & 1
+                dynamic = (traits_ref >> 2) & 1
+                
+                obj = {'_class': class_name, '_externalized': externalized, '_dynamic': dynamic}
+                
+                if not externalized and not dynamic:
+                    # Read sealed members
+                    member_count = traits_ref >> 3
+                    members = []
+                    for _ in range(member_count):
+                        mref = self.read_u29()
+                        if mref & 1:
+                            mlen = mref >> 1
+                            mname = self.data[self.pos:self.pos+mlen].decode('utf-8', errors='replace')
+                            self.pos += mlen
+                            members.append(mname)
+                        else:
+                            members.append(f"<member ref {mref >> 1}>")
+                    
+                    for m in members:
+                        obj[m] = self.read_amf3(self.read_byte())
+                    
+                    if dynamic:
+                        while True:
+                            key_ref = self.read_u29()
+                            if key_ref & 1:
+                                key_len = key_ref >> 1
+                                key = self.data[self.pos:self.pos+key_len].decode('utf-8', errors='replace')
+                                self.pos += key_len
+                                if key == '':
+                                    break
+                                obj[key] = self.read_amf3(self.read_byte())
+                            else:
+                                break
+                elif externalized:
+                    # Read externalized data - just store raw bytes for now
+                    obj['_externalized_data'] = '<externalized>'
+                    # Try to read as string
+                    try:
+                        ext_marker = self.read_byte()
+                        if ext_marker == AMF3_STRING:
+                            ext_ref = self.read_u29()
+                            if ext_ref & 1:
+                                ext_len = ext_ref >> 1
+                                ext_data = self.data[self.pos:self.pos+ext_len]
+                                self.pos += ext_len
+                                obj['_externalized_data'] = ext_data.hex()
+                    except:
+                        pass
+                return obj
+            else:
+                return f"<traits ref {traits_ref >> 1}>"
+        elif marker == AMF3_BYTE_ARRAY:
+            ref = self.read_u29()
+            if ref & 1:
+                length = ref >> 1
+                data = self.data[self.pos:self.pos+length]
+                self.pos += length
+                return data.hex()
+            else:
+                return f"<bytearray ref {ref >> 1}>"
+        else:
+            return f"<unknown AMF3 marker 0x{marker:02x}>"
+    
+    def parse(self):
+        version = self.read_short()
+        header_count = self.read_short()
+        headers = []
+        for _ in range(header_count):
+            name = self.read_utf8()
+            must_understand = self.read_byte()
+            data_len = self.read_long()
+            value = self.read_amf0()
+            headers.append({'name': name, 'value': value})
+        
+        body_count = self.read_short()
+        bodies = []
+        for _ in range(body_count):
+            target_uri = self.read_utf8()
+            response_uri = self.read_utf8()
+            data_len = self.read_long()
+            value = self.read_amf0()
+            bodies.append({
+                'target_uri': target_uri,
+                'response_uri': response_uri,
+                'data': value
+            })
+        
+        return {'version': version, 'headers': headers, 'bodies': bodies}
+
+class AMFWriter:
+    def __init__(self):
+        self.data = bytearray()
+        self.strings = []
+    
+    def write_byte(self, v):
+        self.data.append(v & 0xFF)
+    
+    def write_short(self, v):
+        self.data.extend(struct.pack('>H', v))
+    
+    def write_long(self, v):
+        self.data.extend(struct.pack('>I', v))
+    
+    def write_double(self, v):
+        self.data.extend(struct.pack('>d', v))
+    
+    def write_utf8(self, s):
+        encoded = s.encode('utf-8')
+        self.write_short(len(encoded))
+        self.data.extend(encoded)
+    
+    def write_u29(self, v):
+        if v < 0x80:
+            self.write_byte(v)
+        elif v < 0x4000:
+            self.write_byte((v >> 7) | 0x80)
+            self.write_byte(v & 0x7F)
+        elif v < 0x200000:
+            self.write_byte((v >> 14) | 0x80)
+            self.write_byte((v >> 7) | 0x80)
+            self.write_byte(v & 0x7F)
+        else:
+            self.write_byte((v >> 22) | 0x80)
+            self.write_byte((v >> 15) | 0x80)
+            self.write_byte((v >> 8) | 0x80)
+            self.write_byte(v & 0xFF)
+    
+    def write_amf0_number(self, v):
+        self.write_byte(AMF0_NUMBER)
+        self.write_double(v)
+    
+    def write_amf0_string(self, s):
+        self.write_byte(AMF0_STRING)
+        self.write_utf8(s)
+    
+    def write_amf0_bool(self, v):
+        self.write_byte(AMF0_BOOLEAN)
+        self.write_byte(1 if v else 0)
+    
+    def write_amf0_null(self):
+        self.write_byte(AMF0_NULL)
+    
+    def write_amf0_object(self, obj):
+        self.write_byte(AMF0_OBJECT)
+        for key, val in obj.items():
+            self.write_utf8(key)
+            if isinstance(val, bool):
+                self.write_amf0_bool(val)
+            elif isinstance(val, (int, float)):
+                self.write_amf0_number(val)
+            elif isinstance(val, str):
+                self.write_amf0_string(val)
+            elif val is None:
+                self.write_amf0_null()
+            elif isinstance(val, dict):
+                self.write_amf0_object(val)
+            elif isinstance(val, list):
+                self.write_amf0_array(val)
+            else:
+                self.write_amf0_string(str(val))
+        self.write_utf8('')
+        self.write_byte(AMF0_OBJECT_END)
+    
+    def write_amf0_array(self, arr):
+        self.write_byte(AMF0_STRICT_ARRAY)
+        self.write_long(len(arr))
+        for item in arr:
+            if isinstance(item, bool):
+                self.write_amf0_bool(item)
+            elif isinstance(item, (int, float)):
+                self.write_amf0_number(item)
+            elif isinstance(item, str):
+                self.write_amf0_string(item)
+            elif item is None:
+                self.write_amf0_null()
+            elif isinstance(item, dict):
+                self.write_amf0_object(item)
+            else:
+                self.write_amf0_string(str(item))
+    
+    def write_amf0_typed_object(self, class_name, obj):
+        self.write_byte(AMF0_TYPED_OBJECT)
+        self.write_utf8(class_name)
+        for key, val in obj.items():
+            self.write_utf8(key)
+            if isinstance(val, bool):
+                self.write_amf0_bool(val)
+            elif isinstance(val, (int, float)):
+                self.write_amf0_number(val)
+            elif isinstance(val, str):
+                self.write_amf0_string(val)
+            elif val is None:
+                self.write_amf0_null()
+            elif isinstance(val, dict):
+                self.write_amf0_object(val)
+            elif isinstance(val, list):
+                self.write_amf0_array(val)
+            else:
+                self.write_amf0_string(str(val))
+        self.write_utf8('')
+        self.write_byte(AMF0_OBJECT_END)
+    
+    def build_response(self, target_uri, response_uri, result_obj):
+        # AMF0 response
+        self.write_short(0)  # AMF0 version
+        self.write_short(0)  # no headers
+        self.write_short(1)  # 1 body
+        self.write_utf8(response_uri)  # /1/onResult
+        self.write_utf8("")  # empty response URI
+        self.write_long(0)  # message length (will be ignored by most clients)
+        
+        # Write the result as typed object
+        if isinstance(result_obj, dict) and '_class' in result_obj:
+            class_name = result_obj.pop('_class')
+            self.write_amf0_typed_object(class_name, result_obj)
+        elif isinstance(result_obj, dict):
+            self.write_amf0_object(result_obj)
+        elif isinstance(result_obj, str):
+            self.write_amf0_string(result_obj)
+        elif isinstance(result_obj, (int, float)):
+            self.write_amf0_number(result_obj)
+        else:
+            self.write_amf0_null()
+        
+        return bytes(self.data)
+
+# Mock responses for each API method
+def get_mock_response(method):
+    if method == 'handshake':
+        return {
+            '_class': 'com.lexialearning.lrs.api.HandshakeResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'login':
+        return {
+            '_class': 'com.lexialearning.lrs.api.LoginResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+            'authToken': 'mock_auth_token_12345',
+            'studentId': 1,
+            'personName': 'Test Student',
+            'language': 'english',
+            'region': 'us',
+            'purpose': 'course',
+            'currentPhaseId': 'a01',
+            'currentUnitIdList': [],
+            'isAuditMode': False,
+            'isUnhidePassword': False,
+            'irtForm': '',
+            'startUnit': 'a01A_bascateg_01',
+            'classList': [],
+            'grade': 'K',
+            'teacher': 'Teacher',
+            'showWarmup': True,
+            'secondsSinceLastLogin': 0,
+            'warmupHighScore': 0,
+        }
+    elif method == 'verifySiteId':
+        return {
+            '_class': 'com.lexialearning.lrs.api.VerifySiteIdResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'unitStatus':
+        return {
+            '_class': 'com.lexialearning.lrs.api.UnitStatusResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'stepEnd':
+        return {
+            '_class': 'com.lexialearning.lrs.api.StepEndResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'saveUnitData':
+        return {
+            '_class': 'com.lexialearning.lrs.api.ResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'saveWarmupScore':
+        return {
+            '_class': 'com.lexialearning.lrs.api.SaveWarmupScoreResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'logout':
+        return {
+            '_class': 'com.lexialearning.lrs.api.LogoutResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'logEvent':
+        return {
+            '_class': 'com.lexialearning.lrs.api.LoggingResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'getCustomerFromTeacher':
+        return {
+            '_class': 'com.lexialearning.lrs.api.TeacherResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    elif method == 'resetStudent':
+        return {
+            '_class': 'com.lexialearning.lrs.api.ResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+    else:
+        return {
+            '_class': 'com.lexialearning.lrs.api.ResponseVO',
+            'errorCode': 0,
+            'errorMessage': None,
+        }
+
+class AMFHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        print(f"[AMF] {args[0]}")
+    
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        
+        print(f"\n=== AMF Request ({content_length} bytes) ===")
+        print(f"Path: {self.path}")
+        print(f"Hex (first 100): {body[:100].hex()}")
+        
+        method = "unknown"
+        try:
+            reader = AMFReader(body)
+            parsed = reader.parse()
+            print(f"Parsed: {json.dumps(parsed, default=str, indent=2)}")
+            
+            if parsed['bodies']:
+                target = parsed['bodies'][0]['target_uri']
+                # Target format: "AMFClient.handshake" or similar
+                parts = target.split('.')
+                if len(parts) >= 2:
+                    method = parts[-1]
+                else:
+                    method = target
+                print(f"\nMethod: {method}")
+        except Exception as e:
+            print(f"Parse error: {e}")
+            traceback.print_exc()
+        
+        # Build mock response
+        mock = get_mock_response(method)
+        writer = AMFWriter()
+        
+        # The response URI should be /1/onResult
+        response_uri = "/1/onResult"
+        response_data = writer.build_response(target, response_uri, mock)
+        
+        print(f"\n=== AMF Response ({len(response_data)} bytes) ===")
+        print(f"Hex (first 100): {response_data[:100].hex()}")
+        print(f"Mock data: {json.dumps(mock, default=str, indent=2)}")
+        
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/x-amf')
+        self.send_header('Content-Length', len(response_data))
+        self.end_headers()
+        self.wfile.write(response_data)
+        
+        # Also save to log file
+        with open('C:\\amf-log.txt', 'a') as f:
+            f.write(f"\n=== {method} ===\n")
+            f.write(f"Request hex: {body.hex()}\n")
+            f.write(f"Response hex: {response_data.hex()}\n")
+            f.write(f"Mock: {json.dumps(mock, default=str)}\n")
+    
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"AMF Mock Server Running")
+
+if __name__ == '__main__':
+    port = int(os.environ.get('AMF_PORT', '8443'))
+    
+    # Create SSL context
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain('C:\\cert.pem', 'C:\\key.pem')
+    
+    server = HTTPServer(('0.0.0.0', port), AMFHandler)
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    
+    print(f"AMF Mock Server running on https://0.0.0.0:{port}")
+    print(f"Waiting for requests...")
+    
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("Server stopped")
+'@
+          
+          $serverCode | Out-File -FilePath "C:\amf_server.py" -Encoding UTF8
+          Write-Host "AMF server script created"
+
+      - name: Create self-signed SSL certificate
+        shell: pwsh
+        run: |
+          # Create self-signed cert for student.mylexia.com
+          $cert = New-SelfSignedCertificate -DnsName "student.mylexia.com", "*.mylexia.com" -CertStoreLocation "Cert:\LocalMachine\My" -KeyUsage DigitalSignature,KeyEncipherment -KeyAlgorithm RSA -KeyLength 2048 -NotAfter (Get-Date).AddYears(1)
+          
+          # Export cert and key for Python
+          $certPath = "C:\cert.pfx"
+          $certPassword = "test123"
+          Export-PfxCertificate -Cert $cert -FilePath $certPath -Password (ConvertTo-SecureString -String $certPassword -AsPlainText -Force)
+          
+          # Convert to PEM using openssl
+          openssl pkcs12 -in $certPath -nocerts -nodes -out C:\key.pem -passin pass:$certPassword 2>&1
+          openssl pkcs12 -in $certPath -nokeys -out C:\cert.pem -passin pass:$certPassword 2>&1
+          
+          # Also export the CA cert to trust store
+          $caCert = Export-Certificate -Cert $cert -FilePath "C:\lexia-ca.cer"
+          Import-Certificate -FilePath "C:\lexia-ca.cer" -CertStoreLocation "Cert:\LocalMachine\Root"
+          
+          Write-Host "SSL certificate created and installed"
+          Get-ChildItem "Cert:\LocalMachine\My" | Where-Object { $_.Subject -like "*mylexia*" } | Format-List
+
+      - name: Redirect hosts file
+        shell: pwsh
+        run: |
+          $hostsPath = "C:\Windows\System32\drivers\etc\hosts"
+          Add-Content $hostsPath "`n127.0.0.1 student.mylexia.com"
+          Add-Content $hostsPath "127.0.0.1 www.mylexia.com"
+          Write-Host "Hosts file updated"
+          Get-Content $hostsPath | Select-Object -Last 5
+          
+          # Flush DNS
+          ipconfig /flushdns
+
+      - name: Start mock AMF server
+        shell: pwsh
+        run: |
+          # Start the AMF server in background
+          $proc = Start-Process -FilePath "python" -ArgumentList "C:\amf_server.py" -PassThru -NoNewWindow -RedirectStandardOutput "C:\amf-stdout.txt" -RedirectStandardError "C:\amf-stderr.txt"
+          Write-Host "AMF server started, PID: $($proc.Id)"
+          Start-Sleep -Seconds 3
+          
+          # Check if it's running
+          if (Test-Path "C:\amf-stdout.txt") {
+            Get-Content "C:\amf-stdout.txt"
+          }
+          if (Test-Path "C:\amf-stderr.txt") {
+            Write-Host "Errors:"
+            Get-Content "C:\amf-stderr.txt"
+          }
+
+      - name: Launch app and screenshot
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          
+          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
+          Write-Host "Launching: $exe"
+          
+          $proc = Start-Process -FilePath $exe -PassThru
+          Write-Host "PID: $($proc.Id)"
+          
+          # Wait for app to load
+          Start-Sleep -Seconds 30
+          
+          # Take screenshot
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+          $bounds = $screen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+          $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          
+          New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
+          $bmp.Save("screenshots/lexia-mock-test.png")
+          $graphics.Dispose()
+          $bmp.Dispose()
+          Write-Host "Screenshot saved"
+          
+          # Check network connections
+          Write-Host "`n=== Network connections ==="
+          Get-NetTCPConnection -OwningProcess $proc.Id -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          
+          # Kill app
+          $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+      - name: Upload AMF logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: amf-logs
+          path: |
+            C:\amf-log.txt
+            C:\amf-stdout.txt
+            C:\amf-stderr.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-test-screenshots
+          path: screenshots/
+          retention-days: 30
+          if-no-files-found: ignore
