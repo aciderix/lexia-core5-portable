@@ -10,26 +10,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Lexia Core5 installer
+      - name: Download Lexia Core5 installer from release
         shell: pwsh
         run: |
-          # Try to find the installer in the repo first, otherwise download it
-          if (Test-Path "lexia-installer.exe") {
-            Write-Host "Using installer from repo"
-          } else {
-            # If you have the installer hosted somewhere, put the URL here
-            # For now we'll check if it's been uploaded as a release asset
-            Write-Host "Please upload lexia-installer.exe to the repo root or a GitHub release"
-            Write-Host "Then update this step to download it"
-            exit 1
-          }
+          $url = "https://github.com/aciderix/lexia-core5-portable/releases/download/v1.0/lexia-installer.exe"
+          Write-Host "Downloading from $url"
+          $headers = @{ "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}" }
+          Invoke-WebRequest -Uri $url -OutFile "lexia-installer.exe" -Headers $headers
+          Write-Host "Downloaded: $((Get-Item lexia-installer.exe).Length) bytes"
 
       - name: Install Lexia Core5 silently
         shell: pwsh
         run: |
           # BitRock installer silent flags
           Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -NoNewWindow
-          Start-Sleep -Seconds 10
+          Start-Sleep -Seconds 15
 
       - name: Find installation directory
         shell: pwsh
@@ -67,7 +62,7 @@ jobs:
       - name: Locate and copy installation files
         shell: pwsh
         run: |
-          # Find the install dir (update this based on previous step output)
+          # Find the install dir
           $installDirs = @(
             "C:\Program Files (x86)\Lexia Learning",
             "C:\Program Files\Lexia Learning",
@@ -103,8 +98,6 @@ jobs:
       - name: Copy Adobe AIR runtime (if needed)
         shell: pwsh
         run: |
-          # AIR runtime is typically installed in:
-          # C:\Program Files (x86)\Common Files\Adobe\AIR\
           $airPaths = @(
             "C:\Program Files (x86)\Common Files\Adobe\AIR",
             "C:\Program Files\Common Files\Adobe\AIR"
@@ -126,10 +119,10 @@ jobs:
           @echo off
           :: Lexia Core5 Portable Launcher
           set SCRIPT_DIR=%~dp0
-          if exist "%SCRIPT_DIR%AdobeAIR" (
-            set AIR_ROOT=%SCRIPT_DIR%AdobeAIR
+          if exist "`${SCRIPT_DIR}AdobeAIR" (
+            set AIR_ROOT=`${SCRIPT_DIR}AdobeAIR
           )
-          start "" "%SCRIPT_DIR%LexiaCore5\LexiaCore5.exe"
+          start "" "`${SCRIPT_DIR}LexiaCore5\LexiaCore5.exe"
           "@ | Out-File -FilePath "portable/LaunchLexia.bat" -Encoding ASCII
 
       - name: Take screenshots of installed app
@@ -138,11 +131,16 @@ jobs:
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
 
+          # Try launching from the install directory directly (before portability)
           $exe = Get-ChildItem "portable/LexiaCore5" -Filter "LexiaCore5.exe" -Recurse | Select-Object -First 1
+          if (-not $exe) {
+            # Search in Program Files if portable copy didn't work
+            $exe = Get-ChildItem "C:\Program Files*\Lexia*" -Filter "LexiaCore5.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
           if ($exe) {
             Write-Host "Launching: $($exe.FullName)"
             $proc = Start-Process -FilePath $exe.FullName -PassThru
-            Start-Sleep -Seconds 15
+            Start-Sleep -Seconds 20
 
             $screen = [System.Windows.Forms.Screen]::PrimaryScreen
             $bounds = $screen.Bounds
@@ -158,6 +156,8 @@ jobs:
 
             Write-Host "Screenshot saved"
             $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "No exe found to screenshot"
           }
 
       - name: Upload portable package
