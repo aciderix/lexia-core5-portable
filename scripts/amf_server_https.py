@@ -337,28 +337,27 @@ def build_acknowledge_message(correlation_id, body_value=None):
 
 def build_amf_response(target_uri, response_uri, amf3_value, version=3):
     """Build AMF response packet.
-    Uses version 3 (AMF3) to match request, with AMF0 strict array + 0x11 switch for body.
+    AMF response: target = response_uri + "/onResult", response = empty string
     """
-    # Version: 3 (AMF3) or 0 (AMF0). Try version 3 first.
     packet = struct.pack(">H", version)
-    packet += struct.pack(">H", 0)  # 0 headers
-    packet += struct.pack(">H", 1)  # 1 body
+    packet += struct.pack(">H", 0)
+    packet += struct.pack(">H", 1)
     
-    # Target URI for response: empty string
+    # Target URI = request response URI + "/onResult"
+    target = response_uri + "/onResult"
+    target_bytes = target.encode("utf-8")
+    packet += struct.pack(">H", len(target_bytes)) + target_bytes
+    
+    # Response URI = empty
     packet += struct.pack(">H", 0)
     
-    # Response URI: "/onResult" appended
-    resp = response_uri + "/onResult"
-    resp_bytes = resp.encode('utf-8')
-    packet += struct.pack(">H", len(resp_bytes)) + resp_bytes
-    
-    # Body: AMF0 strict array with 1 element, AMF3 via 0x11 switch
+    # Body: AMF0 strict array + AMF3 switch
     body_data = bytes([0x0A]) + struct.pack(">I", 1) + bytes([0x11]) + amf3_value
-    
     packet += struct.pack(">I", len(body_data))
     packet += body_data
     
     return packet
+
 
 def build_error_response(target_uri, response_uri, error_msg):
     """Build AMF error response."""
@@ -378,14 +377,14 @@ def build_error_response(target_uri, response_uri, error_msg):
         ("timeToLive", enc_int(0)),
     ], None, st)
     
-    resp = response_uri + "/onStatus"
-    resp_bytes = resp.encode('utf-8')
+    target = response_uri + "/onStatus"
+    target_bytes = target.encode('utf-8')
     
     packet = struct.pack(">H", 3)
     packet += struct.pack(">H", 0)
     packet += struct.pack(">H", 1)
-    packet += struct.pack(">H", 0)  # empty target
-    packet += struct.pack(">H", len(resp_bytes)) + resp_bytes
+    packet += struct.pack(">H", len(target_bytes)) + target_bytes  # target
+    packet += struct.pack(">H", 0)  # empty response URI
     
     body_data = bytes([0x0A]) + struct.pack(">I", 1) + bytes([0x11]) + err
     packet += struct.pack(">I", len(body_data))
