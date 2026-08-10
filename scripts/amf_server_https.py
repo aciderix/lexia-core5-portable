@@ -469,9 +469,8 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
                         st = []
                         
                         if operation == 'handshake':
-                            # Return HandshakeResponseVO with errorCode=0
-                            vo = build_handshake_response(st)
-                            ack = build_acknowledge_message(correlation_id=msg_id, body_value=vo, st=st)
+                            # TEST: Send null body to isolate crash issue
+                            ack = build_acknowledge_message(correlation_id=msg_id, body_value=enc_null())
                             resp = build_amf_response(b['target'], b['response'], ack, version=packet['version'])
                             
                             self.send_response(200)
@@ -479,7 +478,7 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
                             self.send_header('Content-Length', len(resp))
                             self.end_headers()
                             self.wfile.write(resp)
-                            log(f"  Sent HandshakeResponseVO ({len(resp)} bytes)")
+                            log(f"  Sent NULL body handshake ({len(resp)} bytes)")
                             log(f"  Response hex: {resp.hex()}")
                             return
                         
