@@ -28,8 +28,7 @@ jobs:
       - name: Check if already installed
         id: check-install
         shell: pwsh
-        run: |
-          if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") { echo "installed=true" >> $env:GITHUB_OUTPUT } else { echo "installed=false" >> $env:GITHUB_OUTPUT }
+        run: if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") { echo "installed=true" >> $env:GITHUB_OUTPUT } else { echo "installed=false" >> $env:GITHUB_OUTPUT }
 
       - name: Install Lexia Core5 silently
         if: steps.check-install.outputs.installed != 'true'
@@ -39,141 +38,139 @@ jobs:
           Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
-      - name: List all files in install directory
+      - name: List install directory
         shell: pwsh
-        run: Get-ChildItem "C:\Program Files (x86)\Lexia Core5" -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+        run: Get-ChildItem "C:\Program Files (x86)\Lexia Core5" | Select-Object Name, Length | Format-Table -AutoSize
 
       - name: Download patched SWF
         shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/aciderix/lexia-core5-portable/releases/download/v1.0/PortalDesktop-patched.swf" -OutFile "PortalDesktop-patched.swf"
-          Write-Host "Downloaded patched SWF"
+        run: Invoke-WebRequest -Uri "https://github.com/aciderix/lexia-core5-portable/releases/download/v1.0/PortalDesktop-patched.swf" -OutFile "PortalDesktop-patched.swf"
 
-      - name: Replace SWF with patched version
+      - name: Replace SWF and copy AMF server
         shell: pwsh
         run: |
           Copy-Item "PortalDesktop-patched.swf" "C:\Program Files (x86)\Lexia Core5\PortalDesktop.swf" -Force
-          Write-Host "Replaced SWF with patched version (HTTP localhost:8080)"
-
-      - name: Copy AMF server script
-        shell: pwsh
-        run: |
           Copy-Item "scripts/amf_server.py" "C:\amf_server.py"
-          Write-Host "AMF server script copied"
+          Write-Host "Files replaced"
 
-      - name: Start mock AMF server (HTTP port 8080)
+      - name: ALL IN ONE - Start server, launch app, interact, screenshot
         shell: pwsh
         run: |
-          Start-Process -FilePath "python" -ArgumentList "C:\amf_server.py" -PassThru -NoNewWindow -RedirectStandardOutput "C:\amf-stdout.txt" -RedirectStandardError "C:\amf-stderr.txt"
-          Start-Sleep -Seconds 5
-          Write-Host "=== Server stdout ==="
-          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
-          Write-Host "=== netstat ==="
-          netstat -an | findstr "8080"
-
-      - name: Create UI automation script
-        shell: pwsh
-        run: |
-          $script = @'
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
+          New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
+
+          # --- Step 1: Start mock AMF server in background job ---
+          Write-Host "Starting AMF server..."
+          $serverJob = Start-Job -ScriptBlock {
+            try {
+              python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8
+            } catch {
+              "FATAL: $_" | Out-File C:\amf-stderr.txt -Encoding UTF8
+            }
+          }
+          Start-Sleep -Seconds 5
           
-          $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd); [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);'
-          $win = Add-Type -MemberDefinition $sig -Name Win32 -Namespace API -PassThru
+          # Check if server is running
+          Write-Host "=== Server job state ==="
+          Receive-Job $serverJob 2>&1
+          Write-Host "Job status: $($serverJob.State)"
           
-          $proc = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
-          if ($proc) {
+          # Try netstat
+          Write-Host "=== netstat 8080 ==="
+          $ns = netstat -an | Select-String "8080"
+          if ($ns) { $ns } else { Write-Host "Port 8080 not found in netstat" }
+          
+          # Check python processes
+          Write-Host "=== Python processes ==="
+          Get-Process -Name python -ErrorAction SilentlyContinue | Format-Table Id, ProcessName -AutoSize
+
+          # --- Step 2: Launch app ---
+          Write-Host "Launching LexiaCore5..."
+          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Write-Host "App PID: $($proc.Id)"
+          Start-Sleep -Seconds 15
+
+          # Take initial screenshot
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+          $bounds = $screen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bmp.Save("screenshots\01-initial.png")
+          $g.Dispose(); $bmp.Dispose()
+          Write-Host "Initial screenshot saved"
+
+          # --- Step 3: Interact with app ---
+          Write-Host "Interacting with app..."
+          
+          # Bring app to foreground using Win32 API
+          $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);'
+          $win = Add-Type -MemberDefinition $sig -Name Win -Namespace U -PassThru -ErrorAction SilentlyContinue
+          if ($win -and $proc.MainWindowHandle -ne 0) {
             $win::SetForegroundWindow($proc.MainWindowHandle)
             Start-Sleep -Milliseconds 500
           }
-          
-          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 384)
+
+          # Click center of screen
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 400)
           Start-Sleep -Milliseconds 300
-          $win::mouse_event(0x02, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 100
-          $win::mouse_event(0x04, 0, 0, 0, 0)
+          
+          # Mouse click via Win32
+          $msig = '[DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);'
+          $mouse = Add-Type -MemberDefinition $msig -Name M -Namespace U -PassThru -ErrorAction SilentlyContinue
+          if ($mouse) {
+            $mouse::mouse_event(0x02, 0, 0, 0, 0)
+            Start-Sleep -Milliseconds 100
+            $mouse::mouse_event(0x04, 0, 0, 0, 0)
+          }
           Start-Sleep -Milliseconds 500
           
+          # Type a site ID
           [System.Windows.Forms.SendKeys]::SendWait("12345")
           Start-Sleep -Milliseconds 500
+          
+          # Press Enter
           [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 10
-          
-          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-          $bounds = $screen.Bounds
+
+          # Screenshot after interaction
           $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
           $bmp.Save("screenshots\02-after-interaction.png")
-          $graphics.Dispose(); $bmp.Dispose()
-          Write-Host "Interaction screenshot saved"
-          '@
-          
-          $script | Out-File -FilePath "C:\ui_automation.ps1" -Encoding UTF8
-          Write-Host "UI automation script created"
+          $g.Dispose(); $bmp.Dispose()
+          Write-Host "After interaction screenshot saved"
 
-      - name: Launch app and take initial screenshot
-        shell: pwsh
-        run: |
-          Add-Type -AssemblyName System.Windows.Forms
-          Add-Type -AssemblyName System.Drawing
-          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
-          $proc = Start-Process -FilePath $exe -PassThru
-          Write-Host "Launched app PID: $($proc.Id)"
-          Start-Sleep -Seconds 15
-          
-          New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
-          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-          $bounds = $screen.Bounds
-          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\01-initial.png")
-          $graphics.Dispose(); $bmp.Dispose()
-          Write-Host "Initial screenshot saved"
-
-      - name: Run UI automation (click + type + enter)
-        shell: pwsh
-        run: |
-          & "C:\ui_automation.ps1"
-
-      - name: Take final screenshots
-        shell: pwsh
-        run: |
-          Add-Type -AssemblyName System.Windows.Forms
-          Add-Type -AssemblyName System.Drawing
-          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-          $bounds = $screen.Bounds
+          # Wait more and take screenshots
           for ($i = 3; $i -le 5; $i++) {
-            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-            $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-            $bmp.Save("screenshots\0$i-final.png")
-            $graphics.Dispose(); $bmp.Dispose()
-            Write-Host "Screenshot $i saved"
             Start-Sleep -Seconds 5
+            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save("screenshots\0$i-delayed.png")
+            $g.Dispose(); $bmp.Dispose()
+            Write-Host "Screenshot $i saved"
           }
 
-      - name: Check AMF server and network
-        shell: pwsh
-        run: |
+          # --- Step 4: Check results ---
           Write-Host "=== AMF Server stdout ==="
           if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
           Write-Host "=== AMF Log ==="
           if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No AMF log (no requests received)" }
           Write-Host "=== netstat ==="
-          netstat -an | findstr "8080"
+          netstat -an | Select-String "8080" || Write-Host "Nothing on 8080"
           Write-Host "=== Processes ==="
-          Get-Process -Name "python","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
+          Get-Process -Name "python","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id -AutoSize
 
-      - name: Stop processes
-        shell: pwsh
-        run: |
+          # Cleanup
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
-          Get-Process -Name "python" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Stop-Job $serverJob -ErrorAction SilentlyContinue
+          Remove-Job $serverJob -ErrorAction SilentlyContinue
 
       - name: Upload AMF logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: amf-logs
@@ -185,6 +182,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload screenshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mock-test-screenshots
