@@ -1,0 +1,176 @@
+name: Build Lexia Core5 Portable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Lexia Core5 installer
+        shell: pwsh
+        run: |
+          # Try to find the installer in the repo first, otherwise download it
+          if (Test-Path "lexia-installer.exe") {
+            Write-Host "Using installer from repo"
+          } else {
+            # If you have the installer hosted somewhere, put the URL here
+            # For now we'll check if it's been uploaded as a release asset
+            Write-Host "Please upload lexia-installer.exe to the repo root or a GitHub release"
+            Write-Host "Then update this step to download it"
+            exit 1
+          }
+
+      - name: Install Lexia Core5 silently
+        shell: pwsh
+        run: |
+          # BitRock installer silent flags
+          Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -NoNewWindow
+          Start-Sleep -Seconds 10
+
+      - name: Find installation directory
+        shell: pwsh
+        run: |
+          # Search common install locations
+          $paths = @(
+            "C:\Program Files\Lexia*",
+            "C:\Program Files (x86)\Lexia*",
+            "C:\Program Files\Lexia Learning*",
+            "C:\Program Files (x86)\Lexia Learning*",
+            "$env:LOCALAPPDATA\Lexia*",
+            "$env:APPDATA\Lexia*",
+            "C:\ProgramData\Lexia*"
+          )
+
+          foreach ($path in $paths) {
+            $found = Get-Item $path -ErrorAction SilentlyContinue
+            if ($found) {
+              Write-Host "Found: $($found.FullName)"
+            }
+          }
+
+          # Also check registry for uninstall info
+          $reg = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          )
+          foreach ($r in $reg) {
+            Get-ItemProperty $r -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*Lexia*" } | ForEach-Object {
+              Write-Host "Registry: $($_.DisplayName) -> $($_.InstallLocation)"
+            }
+          }
+
+      - name: Locate and copy installation files
+        shell: pwsh
+        run: |
+          # Find the install dir (update this based on previous step output)
+          $installDirs = @(
+            "C:\Program Files (x86)\Lexia Learning",
+            "C:\Program Files\Lexia Learning",
+            "C:\Program Files (x86)\Lexia",
+            "C:\Program Files\Lexia"
+          )
+
+          $installDir = $null
+          foreach ($dir in $installDirs) {
+            if (Test-Path $dir) {
+              $installDir = $dir
+              break
+            }
+          }
+
+          if (-not $installDir) {
+            # Broad search as fallback
+            $installDir = (Get-ChildItem "C:\Program Files*\Lexia*" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+
+          if ($installDir) {
+            Write-Host "Install dir: $installDir"
+            New-Item -ItemType Directory -Force -Path "portable/LexiaCore5" | Out-Null
+            Copy-Item -Path "$installDir\*" -Destination "portable/LexiaCore5/" -Recurse -Force
+            Write-Host "Copied installation files"
+          } else {
+            Write-Host "ERROR: Could not find installation directory"
+            Get-ChildItem "C:\Program Files*" -Directory | Where-Object { $_.Name -like "*Lexia*" -or $_.Name -like "*lexia*" }
+            Get-ChildItem "C:\Program Files*" -Directory | Where-Object { $_.Name -like "*Adobe*" }
+            exit 1
+          }
+
+      - name: Copy Adobe AIR runtime (if needed)
+        shell: pwsh
+        run: |
+          # AIR runtime is typically installed in:
+          # C:\Program Files (x86)\Common Files\Adobe\AIR\
+          $airPaths = @(
+            "C:\Program Files (x86)\Common Files\Adobe\AIR",
+            "C:\Program Files\Common Files\Adobe\AIR"
+          )
+
+          foreach ($airPath in $airPaths) {
+            if (Test-Path $airPath) {
+              Write-Host "Found AIR runtime: $airPath"
+              New-Item -ItemType Directory -Force -Path "portable/AdobeAIR" | Out-Null
+              Copy-Item -Path "$airPath\*" -Destination "portable/AdobeAIR/" -Recurse -Force
+              break
+            }
+          }
+
+      - name: Create launcher script
+        shell: pwsh
+        run: |
+          @"
+          @echo off
+          :: Lexia Core5 Portable Launcher
+          set SCRIPT_DIR=%~dp0
+          if exist "%SCRIPT_DIR%AdobeAIR" (
+            set AIR_ROOT=%SCRIPT_DIR%AdobeAIR
+          )
+          start "" "%SCRIPT_DIR%LexiaCore5\LexiaCore5.exe"
+          "@ | Out-File -FilePath "portable/LaunchLexia.bat" -Encoding ASCII
+
+      - name: Take screenshots of installed app
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+
+          $exe = Get-ChildItem "portable/LexiaCore5" -Filter "LexiaCore5.exe" -Recurse | Select-Object -First 1
+          if ($exe) {
+            Write-Host "Launching: $($exe.FullName)"
+            $proc = Start-Process -FilePath $exe.FullName -PassThru
+            Start-Sleep -Seconds 15
+
+            $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+            $bounds = $screen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+
+            $screenshotPath = "screenshots"
+            New-Item -ItemType Directory -Force -Path $screenshotPath | Out-Null
+            $bmp.Save("$screenshotPath/lexia-screenshot.png")
+            $graphics.Dispose()
+            $bmp.Dispose()
+
+            Write-Host "Screenshot saved"
+            $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lexia-core5-portable
+          path: portable/
+          retention-days: 30
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: lexia-screenshots
+          path: screenshots/
+          retention-days: 30
+          if-no-files-found: ignore
