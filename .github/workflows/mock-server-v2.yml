@@ -46,84 +46,71 @@ jobs:
           Copy-Item "scripts/amf_server.py" "C:\amf_server.py"
           Write-Host "Files replaced"
 
-      - name: ALL IN ONE - Server + App + Window + Interact + Screenshot
+      - name: Create interaction script
         shell: pwsh
         run: |
+          # Write the interaction script to a separate file to avoid YAML issues
+          $code = '
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
           New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
 
-          # --- Start mock AMF server ---
+          # Start AMF server
           Write-Host "Starting AMF server..."
-          $serverJob = Start-Job -ScriptBlock {
-            python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8
-          }
+          $serverJob = Start-Job -ScriptBlock { python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8 }
           Start-Sleep -Seconds 5
           Write-Host "=== netstat ==="
           netstat -an | Select-String "8080"
 
-          # --- Win32 API helpers ---
-          $sig = @'
-          [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-          [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-          [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);
-          [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string w);
-          [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc p, IntPtr l);
-          [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
-          [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-          public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-'@
-          $win = Add-Type -MemberDefinition $sig -Name W -Namespace U -PassThru
+          # Win32 API
+          $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
+          $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
+          $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
+          $fw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern IntPtr FindWindow(string c, string w);" -Name FW -Namespace W -PassThru
 
-          # --- Launch app ---
+          # Launch app
           Write-Host "Launching LexiaCore5..."
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "App PID: $($proc.Id)"
           Start-Sleep -Seconds 10
 
-          # --- Check app window ---
-          Write-Host "=== App window info ==="
-          $proc2 = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
-          if ($proc2) {
-            Write-Host "MainWindowHandle: $($proc2.MainWindowHandle)"
-            Write-Host "MainWindowTitle: '$($proc2.MainWindowTitle)'"
-            
-            if ($proc2.MainWindowHandle -eq 0 -or $proc2.MainWindowTitle -eq "") {
-              Write-Host "No main window! Trying to find AIR windows..."
-              # Find all visible windows
-              $sb = New-Object System.Text.StringBuilder 256
-              $windows = [System.Collections.ArrayList]::new()
-              $enumProc = [U.W+EnumWindowsProc]{
-                param($hWnd, $lParam)
-                if ([U.W]::IsWindowVisible($hWnd)) {
-                  $title = New-Object System.Text.StringBuilder 256
-                  [U.W]::GetWindowText($hWnd, $title, 256) | Out-Null
-                  $t = $title.ToString()
-                  if ($t) { $windows.Add("$hWnd | $t") | Out-Null }
+          # Check app window
+          $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
+          if ($p) {
+            Write-Host "MainWindowHandle: $($p.MainWindowHandle)"
+            Write-Host "MainWindowTitle: $($p.MainWindowTitle)"
+
+            if ($p.MainWindowHandle -ne 0) {
+              $sw::ShowWindow($p.MainWindowHandle, 3) | Out-Null
+              Start-Sleep -Milliseconds 500
+              $fg::SetForegroundWindow($p.MainWindowHandle) | Out-Null
+              Start-Sleep -Seconds 5
+            } else {
+              Write-Host "No main window handle. Trying FindWindow..."
+              $hWnd = $fw::FindWindow($null, "Lexia Core5")
+              if ($hWnd -ne [IntPtr]::Zero) {
+                Write-Host "Found window: $hWnd"
+                $sw::ShowWindow($hWnd, 3) | Out-Null
+                $fg::SetForegroundWindow($hWnd) | Out-Null
+                Start-Sleep -Seconds 5
+              } else {
+                Write-Host "Could not find Lexia window by title"
+                # List all window titles
+                Add-Type -AssemblyName UIAutomationClient
+                $root = [System.Windows.Automation.AutomationElement]::RootElement
+                $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Window)
+                $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
+                foreach ($w in $windows) {
+                  Write-Host "  Window: $($w.Current.Name)"
                 }
-                return $true
               }
-              [U.W]::EnumWindows($enumProc, [IntPtr]::Zero) | Out-Null
-              Write-Host "=== Visible windows ==="
-              $windows | ForEach-Object { Write-Host "  $_" }
             }
-            
-            # Try to maximize and bring to front
-            Write-Host "Maximizing app window..."
-            [U.W]::ShowWindow($proc2.MainWindowHandle, 3) | Out-Null  # SW_MAXIMIZE
-            Start-Sleep -Milliseconds 500
-            [U.W]::SetForegroundWindow($proc2.MainWindowHandle) | Out-Null
-            Start-Sleep -Seconds 5
           } else {
-            Write-Host "LexiaCore5 process not found!"
+            Write-Host "LexiaCore5 not running!"
           }
 
-          # Minimize all other windows using keyboard shortcut
-          [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
-          Start-Sleep -Milliseconds 500
-
-          # --- Take initial screenshot ---
+          # Screenshot
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
           $bounds = $screen.Bounds
           $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
@@ -133,25 +120,19 @@ jobs:
           $g.Dispose(); $bmp.Dispose()
           Write-Host "Initial screenshot saved"
 
-          # --- Interact ---
-          Write-Host "Interacting with app..."
-          # Click on upper-center area where site ID input likely is
+          # Interact: click center-top (site ID field area)
+          Write-Host "Clicking site ID field..."
           [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 300)
           Start-Sleep -Milliseconds 300
-          [U.W]::mouse_event(0x02, 0, 0, 0, 0)
+          $me::mouse_event(0x02, 0, 0, 0, 0)
           Start-Sleep -Milliseconds 100
-          [U.W]::mouse_event(0x04, 0, 0, 0, 0)
+          $me::mouse_event(0x04, 0, 0, 0, 0)
           Start-Sleep -Milliseconds 500
-          
-          # Type site ID
           [System.Windows.Forms.SendKeys]::SendWait("12345")
           Start-Sleep -Milliseconds 500
-          
-          # Tab to the connect button and press Enter
           [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 5
 
-          # Screenshot after first interaction
           $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
@@ -159,15 +140,15 @@ jobs:
           $g.Dispose(); $bmp.Dispose()
           Write-Host "After input screenshot saved"
 
-          # Try clicking at different positions (lower-center for button)
+          # Try clicking lower center (connect button area)
+          Write-Host "Clicking connect button..."
           [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 500)
           Start-Sleep -Milliseconds 300
-          [U.W]::mouse_event(0x02, 0, 0, 0, 0)
+          $me::mouse_event(0x02, 0, 0, 0, 0)
           Start-Sleep -Milliseconds 100
-          [U.W]::mouse_event(0x04, 0, 0, 0, 0)
+          $me::mouse_event(0x04, 0, 0, 0, 0)
           Start-Sleep -Seconds 5
 
-          # Screenshot after button click
           $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
@@ -175,7 +156,7 @@ jobs:
           $g.Dispose(); $bmp.Dispose()
           Write-Host "After click screenshot saved"
 
-          # More screenshots
+          # More delayed screenshots
           for ($i = 4; $i -le 6; $i++) {
             Start-Sleep -Seconds 5
             $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
@@ -186,11 +167,11 @@ jobs:
             Write-Host "Screenshot $i saved"
           }
 
-          # --- Check results ---
+          # Check results
           Write-Host "=== AMF Server stdout ==="
           if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
           Write-Host "=== AMF Log ==="
-          if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No AMF log (no requests received)" }
+          if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No AMF log" }
           Write-Host "=== netstat ==="
           netstat -an | Select-String "8080"
           Write-Host "=== Processes ==="
@@ -200,6 +181,15 @@ jobs:
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
           Stop-Job $serverJob -ErrorAction SilentlyContinue
           Remove-Job $serverJob -ErrorAction SilentlyContinue
+          '
+          
+          $code | Out-File -FilePath "C:\interact.ps1" -Encoding UTF8
+          Write-Host "Script created"
+
+      - name: Run interaction script
+        shell: pwsh
+        run: |
+          & "C:\interact.ps1"
 
       - name: Upload AMF logs
         if: always()
