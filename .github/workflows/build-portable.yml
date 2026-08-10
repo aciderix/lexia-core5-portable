@@ -13,17 +13,27 @@ jobs:
       - name: Download Lexia Core5 installer from release
         shell: pwsh
         run: |
-          $url = "https://github.com/aciderix/lexia-core5-portable/releases/download/v1.0/lexia-installer.exe"
-          Write-Host "Downloading from $url"
-          $headers = @{ "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}" }
-          Invoke-WebRequest -Uri $url -OutFile "lexia-installer.exe" -Headers $headers
-          Write-Host "Downloaded: $((Get-Item lexia-installer.exe).Length) bytes"
+          # Use the GitHub API for private repos (Accept: application/octet-stream)
+          $apiUrl = "https://api.github.com/repos/aciderix/lexia-core5-portable/releases/assets/508863891"
+          $headers = @{
+            "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
+            "Accept" = "application/octet-stream"
+          }
+          Write-Host "Downloading via API..."
+          Invoke-WebRequest -Uri $apiUrl -OutFile "lexia-installer.exe" -Headers $headers
+          $size = (Get-Item "lexia-installer.exe").Length
+          Write-Host "Downloaded: $size bytes ($([math]::Round($size / 1MB, 1)) MB)"
+          if ($size -lt 100000000) {
+            Write-Host "ERROR: File too small, download may have failed"
+            exit 1
+          }
 
       - name: Install Lexia Core5 silently
         shell: pwsh
         run: |
           # BitRock installer silent flags
-          Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -NoNewWindow
+          $proc = Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -PassThru
+          Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
       - name: Find installation directory
@@ -47,7 +57,7 @@ jobs:
             }
           }
 
-          # Also check registry for uninstall info
+          # Also check registry
           $reg = @(
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
             "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -62,7 +72,6 @@ jobs:
       - name: Locate and copy installation files
         shell: pwsh
         run: |
-          # Find the install dir
           $installDirs = @(
             "C:\Program Files (x86)\Lexia Learning",
             "C:\Program Files\Lexia Learning",
@@ -79,7 +88,6 @@ jobs:
           }
 
           if (-not $installDir) {
-            # Broad search as fallback
             $installDir = (Get-ChildItem "C:\Program Files*\Lexia*" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           }
 
@@ -131,10 +139,8 @@ jobs:
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
 
-          # Try launching from the install directory directly (before portability)
           $exe = Get-ChildItem "portable/LexiaCore5" -Filter "LexiaCore5.exe" -Recurse | Select-Object -First 1
           if (-not $exe) {
-            # Search in Program Files if portable copy didn't work
             $exe = Get-ChildItem "C:\Program Files*\Lexia*" -Filter "LexiaCore5.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           }
           if ($exe) {
