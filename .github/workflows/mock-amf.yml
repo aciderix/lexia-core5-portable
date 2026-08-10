@@ -1,6 +1,6 @@
 name: Mock AMF Server Test
 
-on:
+"on":
   workflow_dispatch:
 
 jobs:
