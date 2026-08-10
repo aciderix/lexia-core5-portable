@@ -2,12 +2,6 @@ name: Mock Server Test
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Run mode
-        required: false
-        default: mock-server
-        type: string
 
 jobs:
   test:
@@ -52,12 +46,19 @@ jobs:
           Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
-      - name: Upload complete PortalDesktop.swf
-        uses: actions/upload-artifact@v4
-        with:
-          name: PortalDesktop-swf
-          path: "C:\\Program Files (x86)\\Lexia Core5\\PortalDesktop.swf"
-          retention-days: 30
+      - name: Download patched SWF
+        shell: pwsh
+        run: |
+          $url = "https://github.com/aciderix/lexia-core5-portable/releases/download/v1.0/PortalDesktop-patched.swf"
+          Invoke-WebRequest -Uri $url -OutFile "PortalDesktop-patched.swf"
+          Write-Host "Downloaded patched SWF"
+
+      - name: Replace SWF with patched version
+        shell: pwsh
+        run: |
+          $swfPath = "C:\Program Files (x86)\Lexia Core5\PortalDesktop.swf"
+          Copy-Item "PortalDesktop-patched.swf" $swfPath -Force
+          Write-Host "Replaced SWF with patched version (HTTP localhost:8080)"
 
       - name: Copy AMF server script
         shell: pwsh
@@ -65,34 +66,7 @@ jobs:
           Copy-Item "scripts/amf_server.py" "C:\amf_server.py"
           Write-Host "AMF server script copied"
 
-      - name: Create self-signed SSL certificate
-        shell: pwsh
-        run: |
-          $cert = New-SelfSignedCertificate -DnsName "student.mylexia.com", "*.mylexia.com" `
-            -CertStoreLocation "Cert:\LocalMachine\My" `
-            -KeyUsage DigitalSignature,KeyEncipherment -KeyAlgorithm RSA -KeyLength 2048 `
-            -NotAfter (Get-Date).AddYears(1)
-          
-          $pfx = "C:\cert.pfx"
-          $pwd = "test123"
-          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString $pwd -AsPlainText -Force)
-          openssl pkcs12 -in $pfx -nocerts -nodes -out C:\key.pem -passin pass:$pwd 2>&1
-          openssl pkcs12 -in $pfx -nokeys -out C:\cert.pem -passin pass:$pwd 2>&1
-          
-          Export-Certificate -Cert $cert -FilePath "C:\lexia-ca.cer"
-          Import-Certificate -FilePath "C:\lexia-ca.cer" -CertStoreLocation "Cert:\LocalMachine\Root"
-          
-          Write-Host "SSL cert created and trusted"
-
-      - name: Redirect hosts file
-        shell: pwsh
-        run: |
-          Add-Content "C:\Windows\System32\drivers\etc\hosts" "`n127.0.0.1 student.mylexia.com"
-          Add-Content "C:\Windows\System32\drivers\etc\hosts" "127.0.0.1 www.mylexia.com"
-          ipconfig /flushdns
-          Write-Host "Hosts redirected"
-
-      - name: Start mock AMF server
+      - name: Start mock AMF server (HTTP port 8080)
         shell: pwsh
         run: |
           Start-Process -FilePath "python" -ArgumentList "C:\amf_server.py" `
@@ -100,8 +74,21 @@ jobs:
             -RedirectStandardOutput "C:\amf-stdout.txt" `
             -RedirectStandardError "C:\amf-stderr.txt"
           Start-Sleep -Seconds 3
+          Write-Host "=== STDOUT ==="
           if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
-          if (Test-Path C:\amf-stderr.txt) { Write-Host "Errors:"; Get-Content C:\amf-stderr.txt }
+          Write-Host "=== STDERR ==="
+          if (Test-Path C:\amf-stderr.txt) { Get-Content C:\amf-stderr.txt }
+
+      - name: Verify mock server is listening
+        shell: pwsh
+        run: |
+          $conn = Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue
+          if ($conn) {
+            Write-Host "Mock server is listening on port 8080"
+            $conn | Format-Table -AutoSize
+          } else {
+            Write-Host "WARNING: Mock server not listening on port 8080!"
+          }
 
       - name: Launch app and screenshot
         shell: pwsh
@@ -111,21 +98,40 @@ jobs:
           
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc = Start-Process -FilePath $exe -PassThru
-          Write-Host "PID: $($proc.Id)"
+          Write-Host "Launched app PID: $($proc.Id)"
+          
+          # Wait for app to load and try to connect
           Start-Sleep -Seconds 30
           
-          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-          $bounds = $screen.Bounds
-          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          
+          # Take multiple screenshots
           New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
-          $bmp.Save("screenshots/lexia-mock-test.png")
-          $graphics.Dispose(); $bmp.Dispose()
-          Write-Host "Screenshot saved"
           
+          for ($i = 1; $i -le 3; $i++) {
+            $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+            $bounds = $screen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save("screenshots\lexia-mock-$i.png")
+            $graphics.Dispose(); $bmp.Dispose()
+            Write-Host "Screenshot $i saved"
+            Start-Sleep -Seconds 10
+          }
+          
+          # Check network connections
+          Write-Host "=== Network connections ==="
           Get-NetTCPConnection -OwningProcess $proc.Id -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          
+          # Also check all connections to port 8080
+          Write-Host "=== Connections to port 8080 ==="
+          Get-NetTCPConnection -RemotePort 8080 -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          
+          # Check AMF server logs
+          Write-Host "=== AMF Server stdout ==="
+          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
+          Write-Host "=== AMF Server stderr ==="
+          if (Test-Path C:\amf-stderr.txt) { Get-Content C:\amf-stderr.txt }
+          
           $proc | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
 
