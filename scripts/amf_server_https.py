@@ -360,61 +360,63 @@ def build_amf_response(target_uri, response_uri, amf3_value, version=3):
 # ==================== VO Response Builders ====================
 
 def build_handshake_response(st=None):
-    """Build HandshakeResponseVO: errorCode=0 (success), errorMessage=null"""
+    """Build HandshakeResponseVO: errorCode=0 (success), errorMessage=null
+    Uses DYNAMIC traits (like AMFPHP does) instead of sealed."""
     if st is None:
         st = []
-    return enc_object("com.lexialearning.lrs.api.HandshakeResponseVO", [
-        ("errorCode", enc_double(0)),      # 0 = success
-        ("errorMessage", enc_null()),        # null = no error
-    ], None, st)
+    return enc_object("com.lexialearning.lrs.api.HandshakeResponseVO", [], {
+        "errorCode": enc_double(0),
+        "errorMessage": enc_null(),
+    }, st)
 
 def build_login_response(st=None):
-    """Build LoginResponseVO with all sealed properties for a successful fake login."""
+    """Build LoginResponseVO with all properties for a successful fake login.
+    Uses DYNAMIC traits (like AMFPHP does)."""
     if st is None:
         st = []
     
     auth_token = "MOCK-AUTH-TOKEN-" + str(uuid.uuid4()).upper()[:8]
     
-    return enc_object("com.lexialearning.lrs.api.LoginResponseVO", [
-        ("authToken", enc_string(auth_token, st)),
-        ("studentId", enc_int(1)),
-        ("personName", enc_string("Student", st)),
-        ("language", enc_string("english", st)),
-        ("region", enc_string("us", st)),
-        ("purpose", enc_string("course", st)),
-        ("currentPhaseId", enc_string("phase1", st)),
-        ("currentUnitIdList", enc_array([], st)),
-        ("isAuditMode", enc_bool(False)),
-        ("isUnhidePassword", enc_bool(False)),
-        ("irtForm", enc_string("", st)),
-        ("startUnit", enc_string("", st)),
-        ("classList", enc_null()),
-        ("grade", enc_string("Grade 2", st)),
-        ("teacher", enc_string("Teacher", st)),
-        ("showWarmup", enc_bool(False)),
-        ("secondsSinceLastLogin", enc_int(0)),
-        ("warmupHighScore", enc_int(0)),
-        ("errorCode", enc_double(0)),
-        ("errorMessage", enc_null()),
-    ], None, st)
+    return enc_object("com.lexialearning.lrs.api.LoginResponseVO", [], {
+        "authToken": enc_string(auth_token, st),
+        "studentId": enc_int(1),
+        "personName": enc_string("Student", st),
+        "language": enc_string("english", st),
+        "region": enc_string("us", st),
+        "purpose": enc_string("course", st),
+        "currentPhaseId": enc_string("phase1", st),
+        "currentUnitIdList": enc_array([], st),
+        "isAuditMode": enc_bool(False),
+        "isUnhidePassword": enc_bool(False),
+        "irtForm": enc_string("", st),
+        "startUnit": enc_string("", st),
+        "classList": enc_null(),
+        "grade": enc_string("Grade 2", st),
+        "teacher": enc_string("Teacher", st),
+        "showWarmup": enc_bool(False),
+        "secondsSinceLastLogin": enc_int(0),
+        "warmupHighScore": enc_int(0),
+        "errorCode": enc_double(0),
+        "errorMessage": enc_null(),
+    }, st)
 
 def build_generic_response(st=None):
-    """Build generic ResponseVO: errorCode=0, errorMessage=null"""
+    """Build generic ResponseVO with dynamic traits."""
     if st is None:
         st = []
-    return enc_object("com.lexialearning.lrs.api.ResponseVO", [
-        ("errorCode", enc_double(0)),
-        ("errorMessage", enc_null()),
-    ], None, st)
+    return enc_object("com.lexialearning.lrs.api.ResponseVO", [], {
+        "errorCode": enc_double(0),
+        "errorMessage": enc_null(),
+    }, st)
 
 def build_logout_response(st=None):
-    """Build LogoutResponseVO"""
+    """Build LogoutResponseVO with dynamic traits."""
     if st is None:
         st = []
-    return enc_object("com.lexialearning.lrs.api.LogoutResponseVO", [
-        ("errorCode", enc_double(0)),
-        ("errorMessage", enc_null()),
-    ], None, st)
+    return enc_object("com.lexialearning.lrs.api.LogoutResponseVO", [], {
+        "errorCode": enc_double(0),
+        "errorMessage": enc_null(),
+    }, st)
 
 # ==================== HTTP Handler ====================
 
