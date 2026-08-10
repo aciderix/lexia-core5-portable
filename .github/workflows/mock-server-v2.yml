@@ -38,6 +38,77 @@ jobs:
           Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
+      - name: Check Adobe AIR installation
+        shell: pwsh
+        run: |
+          # Check if AIR is installed
+          $airPath = "C:\Program Files (x86)\Common Files\Adobe AIR"
+          $airReg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Adobe\AIR" -ErrorAction SilentlyContinue
+          Write-Host "AIR folder exists: $(Test-Path $airPath)"
+          Write-Host "AIR registry: $(if($airReg){$airReg.Version}else{'not found'})"
+          
+          # List the Adobe AIR folder in the Lexia install dir
+          $lexiaAirDir = "C:\Program Files (x86)\Lexia Core5\Adobe AIR"
+          if (Test-Path $lexiaAirDir) {
+            Write-Host "=== Lexia's Adobe AIR folder ==="
+            Get-ChildItem $lexiaAirDir -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+          }
+          
+          # Also list META-INF
+          $metaDir = "C:\Program Files (x86)\Lexia Core5\META-INF"
+          if (Test-Path $metaDir) {
+            Write-Host "=== META-INF folder ==="
+            Get-ChildItem $metaDir -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+          }
+
+      - name: Install Adobe AIR Runtime
+        shell: pwsh
+        run: |
+          # Try to download Adobe AIR installer
+          $airUrls = @(
+            "https://airdownload.adobe.com/air/win/download/32/AdobeAIRInstaller.exe",
+            "https://fpdownload.macromedia.com/air/win/download/32/AdobeAIRInstaller.exe",
+            "https://web.archive.org/web/2020/https://airdownload.adobe.com/air/win/download/latest/AdobeAIRInstaller.exe"
+          )
+          
+          $airInstalled = $false
+          foreach ($url in $airUrls) {
+            try {
+              Write-Host "Trying: $url"
+              Invoke-WebRequest -Uri $url -OutFile "AdobeAIRInstaller.exe" -TimeoutSec 30
+              Write-Host "Downloaded AIR installer: $((Get-Item AdobeAIRInstaller.exe).Length) bytes"
+              
+              $proc = Start-Process -FilePath ".\AdobeAIRInstaller.exe" -ArgumentList "-silent","-eulaAccepted" -Wait -PassThru
+              Write-Host "AIR installer exit code: $($proc.ExitCode)"
+              Start-Sleep -Seconds 10
+              
+              # Verify
+              $airReg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Adobe\AIR" -ErrorAction SilentlyContinue
+              if ($airReg) {
+                Write-Host "AIR installed! Version: $($airReg.Version)"
+                $airInstalled = $true
+                break
+              }
+            } catch {
+              Write-Host "Failed: $_"
+            }
+          }
+          
+          if (-not $airInstalled) {
+            Write-Host "Could not install AIR from download. Checking if Lexia bundles it..."
+            # Some AIR apps have a captive runtime in their Adobe AIR folder
+            # Check for the AIR runtime DLLs
+            $lexiaAirDir = "C:\Program Files (x86)\Lexia Core5\Adobe AIR"
+            if (Test-Path "$lexiaAirDir\Versions\1.0") {
+              Write-Host "Found captive AIR runtime in Lexia folder"
+              # Try copying to the system AIR location
+              $systemAir = "C:\Program Files (x86)\Common Files\Adobe AIR\Versions\1.0"
+              New-Item -ItemType Directory -Force -Path $systemAir | Out-Null
+              Copy-Item "$lexiaAirDir\*" $systemAirDir -Recurse -Force
+              Write-Host "Copied captive AIR runtime to system location"
+            }
+          }
+
       - name: Download patched SWF and replace
         shell: pwsh
         run: |
@@ -46,10 +117,9 @@ jobs:
           Copy-Item "scripts/amf_server.py" "C:\amf_server.py"
           Write-Host "Files replaced"
 
-      - name: Create interaction script
+      - name: Create and run interaction script
         shell: pwsh
         run: |
-          # Write the interaction script to a separate file to avoid YAML issues
           $code = '
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
@@ -59,55 +129,38 @@ jobs:
           Write-Host "Starting AMF server..."
           $serverJob = Start-Job -ScriptBlock { python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8 }
           Start-Sleep -Seconds 5
-          Write-Host "=== netstat ==="
           netstat -an | Select-String "8080"
 
           # Win32 API
           $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
           $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
           $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
-          $fw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern IntPtr FindWindow(string c, string w);" -Name FW -Namespace W -PassThru
 
           # Launch app
           Write-Host "Launching LexiaCore5..."
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "App PID: $($proc.Id)"
-          Start-Sleep -Seconds 10
-
-          # Check app window
+          
+          # Wait for app to start
+          Start-Sleep -Seconds 15
+          
+          # Check if process is still alive
           $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
-          if ($p) {
-            Write-Host "MainWindowHandle: $($p.MainWindowHandle)"
+          if (-not $p) {
+            Write-Host "PROCESS DIED! Checking exit code..."
+            Write-Host "Exit code: $($proc.ExitCode)"
+            Write-Host "Has exited: $($proc.HasExited)"
+          } else {
+            Write-Host "Process alive. MainWindowHandle: $($p.MainWindowHandle)"
             Write-Host "MainWindowTitle: $($p.MainWindowTitle)"
-
+            
             if ($p.MainWindowHandle -ne 0) {
               $sw::ShowWindow($p.MainWindowHandle, 3) | Out-Null
               Start-Sleep -Milliseconds 500
               $fg::SetForegroundWindow($p.MainWindowHandle) | Out-Null
               Start-Sleep -Seconds 5
-            } else {
-              Write-Host "No main window handle. Trying FindWindow..."
-              $hWnd = $fw::FindWindow($null, "Lexia Core5")
-              if ($hWnd -ne [IntPtr]::Zero) {
-                Write-Host "Found window: $hWnd"
-                $sw::ShowWindow($hWnd, 3) | Out-Null
-                $fg::SetForegroundWindow($hWnd) | Out-Null
-                Start-Sleep -Seconds 5
-              } else {
-                Write-Host "Could not find Lexia window by title"
-                # List all window titles
-                Add-Type -AssemblyName UIAutomationClient
-                $root = [System.Windows.Automation.AutomationElement]::RootElement
-                $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Window)
-                $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
-                foreach ($w in $windows) {
-                  Write-Host "  Window: $($w.Current.Name)"
-                }
-              }
             }
-          } else {
-            Write-Host "LexiaCore5 not running!"
           }
 
           # Screenshot
@@ -120,44 +173,29 @@ jobs:
           $g.Dispose(); $bmp.Dispose()
           Write-Host "Initial screenshot saved"
 
-          # Interact: click center-top (site ID field area)
-          Write-Host "Clicking site ID field..."
-          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 300)
-          Start-Sleep -Milliseconds 300
-          $me::mouse_event(0x02, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 100
-          $me::mouse_event(0x04, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("12345")
-          Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-          Start-Sleep -Seconds 5
+          # Try interaction
+          if ($p -and $p.MainWindowHandle -ne 0) {
+            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 300)
+            Start-Sleep -Milliseconds 300
+            $me::mouse_event(0x02, 0, 0, 0, 0)
+            Start-Sleep -Milliseconds 100
+            $me::mouse_event(0x04, 0, 0, 0, 0)
+            Start-Sleep -Milliseconds 500
+            [System.Windows.Forms.SendKeys]::SendWait("12345")
+            Start-Sleep -Milliseconds 500
+            [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+            Start-Sleep -Seconds 5
 
-          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\02-after-input.png")
-          $g.Dispose(); $bmp.Dispose()
-          Write-Host "After input screenshot saved"
+            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save("screenshots\02-after-input.png")
+            $g.Dispose(); $bmp.Dispose()
+            Write-Host "After input screenshot saved"
+          }
 
-          # Try clicking lower center (connect button area)
-          Write-Host "Clicking connect button..."
-          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 500)
-          Start-Sleep -Milliseconds 300
-          $me::mouse_event(0x02, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 100
-          $me::mouse_event(0x04, 0, 0, 0, 0)
-          Start-Sleep -Seconds 5
-
-          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\03-after-click.png")
-          $g.Dispose(); $bmp.Dispose()
-          Write-Host "After click screenshot saved"
-
-          # More delayed screenshots
-          for ($i = 4; $i -le 6; $i++) {
+          # More screenshots
+          for ($i = 3; $i -le 5; $i++) {
             Start-Sleep -Seconds 5
             $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -167,28 +205,20 @@ jobs:
             Write-Host "Screenshot $i saved"
           }
 
-          # Check results
+          # Results
           Write-Host "=== AMF Server stdout ==="
           if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
           Write-Host "=== AMF Log ==="
           if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No AMF log" }
-          Write-Host "=== netstat ==="
-          netstat -an | Select-String "8080"
           Write-Host "=== Processes ==="
           Get-Process -Name "python","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
-          # Cleanup
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
           Stop-Job $serverJob -ErrorAction SilentlyContinue
           Remove-Job $serverJob -ErrorAction SilentlyContinue
           '
           
           $code | Out-File -FilePath "C:\interact.ps1" -Encoding UTF8
-          Write-Host "Script created"
-
-      - name: Run interaction script
-        shell: pwsh
-        run: |
           & "C:\interact.ps1"
 
       - name: Upload AMF logs
