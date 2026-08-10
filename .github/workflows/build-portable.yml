@@ -1,7 +1,16 @@
 name: Build Lexia Core5 Portable
 
-on:
+"on":
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode: build-only or mock-server'
+        required: false
+        default: 'build'
+        type: choice
+        options:
+          - build
+          - mock-server
 
 jobs:
   build:
@@ -26,17 +35,13 @@ jobs:
             "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
             "Accept" = "application/octet-stream"
           }
-          Write-Host "Downloading installer..."
           Invoke-WebRequest -Uri $apiUrl -OutFile "lexia-installer.exe" -Headers $headers
-          $size = (Get-Item "lexia-installer.exe").Length
-          Write-Host "Downloaded: $size bytes"
 
       - name: Check if already installed
         id: check-install
         shell: pwsh
         run: |
           if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") {
-            Write-Host "Already installed, skipping installation"
             echo "installed=true" >> $env:GITHUB_OUTPUT
           } else {
             echo "installed=false" >> $env:GITHUB_OUTPUT
@@ -50,232 +55,378 @@ jobs:
           Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
-      - name: Search config files for server URLs
-        shell: pwsh
-        run: |
-          $installDir = "C:\Program Files (x86)\Lexia Core5"
-          Write-Host "=== Searching for config files ==="
-          
-          # Find all config-like files
-          $configFiles = Get-ChildItem $installDir -Recurse -Include *.xml,*.json,*.ini,*.cfg,*.config,*.properties,*.txt,*.swf -ErrorAction SilentlyContinue
-          
-          foreach ($f in $configFiles) {
-            $relPath = $f.FullName.Replace($installDir, "")
-            Write-Host "`n--- $relPath ($($f.Length) bytes) ---"
-            
-            # For text files, show content
-            if ($f.Length -lt 50000) {
-              $content = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-              if ($content) {
-                # Look for URLs, server names, domains
-                $urls = [regex]::Matches($content, '(https?://[^\s<>"''`]+|[\w-]+\.(com|net|org|io|co)[^\s<>"''`]*)')
-                if ($urls.Count -gt 0) {
-                  Write-Host "  URLs found:"
-                  foreach ($u in $urls) { Write-Host "    $($u.Value)" }
-                }
-                
-                # Show first 500 chars of text configs
-                if ($f.Extension -in @('.xml','.json','.ini','.cfg','.config','.properties','.txt')) {
-                  Write-Host "  Content preview:"
-                  Write-Host $content.Substring(0, [Math]::Min(500, $content.Length))
-                }
-              }
-            } else {
-              Write-Host "  (binary, $($f.Length) bytes)"
-            }
-          }
-          
-          # Also search for domain names in binary files
-          Write-Host "`n=== Searching binaries for server URLs ==="
-          $binaries = Get-ChildItem $installDir -Recurse -Include *.exe,*.dll,*.swf -ErrorAction SilentlyContinue
-          foreach ($b in $binaries) {
-            $bytes = [System.IO.File]::ReadAllBytes($b.FullName)
-            $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-            $urls = [regex]::Matches($text, '(https?://[^\s\x00-\x1f"''<>]+)')
-            $domains = [regex]::Matches($text, '([\w-]+\.lexia[^\s\x00-\x1f"''<>]*)')
-            $allMatches = $urls + $domains | Select-Object -Unique -Property Value
-            if ($allMatches) {
-              Write-Host "`n  $($b.Name):"
-              foreach ($m in $allMatches | Select-Object -First 20) {
-                Write-Host "    $($m.Value)"
-              }
-            }
-          }
+      - name: Upload complete PortalDesktop.swf
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortalDesktop-swf
+          path: "C:\\Program Files (x86)\\Lexia Core5\\PortalDesktop.swf"
+          retention-days: 30
 
-      - name: Start network capture
+      # ============ MOCK SERVER MODE ============
+      - name: Create mock AMF gateway server
+        if: github.event.inputs.mode == 'mock-server'
         shell: pwsh
         run: |
-          # Start packet capture with pktmon (built into Windows 10+)
-          Write-Host "Starting packet capture..."
-          pktmon start --capture --comp nics -f C:\trace.etl
-          Write-Host "Packet capture started"
+          $serverCode = @'
+import struct, sys, os, json, ssl, traceback
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+AMF0_NUMBER=0x00; AMF0_BOOLEAN=0x01; AMF0_STRING=0x02; AMF0_OBJECT=0x03
+AMF0_NULL=0x05; AMF0_UNDEFINED=0x06; AMF0_OBJECT_END=0x09
+AMF0_STRICT_ARRAY=0x0A; AMF0_DATE=0x0B; AMF0_LONG_STRING=0x0C
+AMF0_TYPED_OBJECT=0x10; AMF0_AMF3=0x11
+
+class AMFReader:
+    def __init__(self, data):
+        self.data = data; self.pos = 0; self.strings = []
+    def read_byte(self):
+        b = self.data[self.pos]; self.pos += 1; return b
+    def read_short(self):
+        v = struct.unpack('>H', self.data[self.pos:self.pos+2])[0]; self.pos += 2; return v
+    def read_long(self):
+        v = struct.unpack('>I', self.data[self.pos:self.pos+4])[0]; self.pos += 4; return v
+    def read_double(self):
+        v = struct.unpack('>d', self.data[self.pos:self.pos+8])[0]; self.pos += 8; return v
+    def read_utf8(self):
+        length = self.read_short()
+        s = self.data[self.pos:self.pos+length].decode('utf-8', errors='replace')
+        self.pos += length; return s
+    def read_amf0(self):
+        marker = self.read_byte()
+        if marker == AMF0_NUMBER: return self.read_double()
+        elif marker == AMF0_BOOLEAN: return self.read_byte() != 0
+        elif marker == AMF0_STRING: return self.read_utf8()
+        elif marker == AMF0_OBJECT:
+            obj = {}
+            while True:
+                key = self.read_utf8()
+                if key == '': self.pos += 1; break
+                obj[key] = self.read_amf0()
+            return obj
+        elif marker == AMF0_NULL: return None
+        elif marker == AMF0_UNDEFINED: return None
+        elif marker == AMF0_STRICT_ARRAY:
+            count = self.read_long(); return [self.read_amf0() for _ in range(count)]
+        elif marker == AMF0_DATE: self.read_double(); return None
+        elif marker == AMF0_TYPED_OBJECT:
+            cn = self.read_utf8(); obj = {'_class': cn}
+            while True:
+                key = self.read_utf8()
+                if key == '': self.pos += 1; break
+                obj[key] = self.read_amf0()
+            return obj
+        elif marker == AMF0_LONG_STRING:
+            length = self.read_long()
+            s = self.data[self.pos:self.pos+length].decode('utf-8', errors='replace')
+            self.pos += length; return s
+        elif marker == AMF0_AMF3:
+            return self.read_amf3()
+        return f"<0x{marker:02x}>"
+    def read_u29(self):
+        result = 0
+        for i in range(3):
+            b = self.read_byte(); result = (result << 7) | (b & 0x7F)
+            if not (b & 0x80): return result
+        b = self.read_byte(); return (result << 8) | b
+    def read_amf3(self):
+        marker = self.read_byte()
+        if marker in (0x00, 0x01): return None
+        elif marker == 0x02: return False
+        elif marker == 0x03: return True
+        elif marker == 0x04: return self.read_u29()
+        elif marker == 0x05: return self.read_double()
+        elif marker == 0x06:
+            ref = self.read_u29()
+            if ref & 1:
+                length = ref >> 1
+                s = self.data[self.pos:self.pos+length].decode('utf-8', errors='replace')
+                self.pos += length; return s
+            return f"<str{ref>>1}>"
+        elif marker == 0x0A:
+            ref = self.read_u29()
+            if ref & 1:
+                cn_ref = self.read_u29()
+                if cn_ref & 1:
+                    cn_len = cn_ref >> 1
+                    cn = self.data[self.pos:self.pos+cn_len].decode('utf-8', errors='replace')
+                    self.pos += cn_len
+                else: cn = f"<cls{cn_ref>>1}>"
+                obj = {'_class': cn}
+                # Skip traits details for now
+                try:
+                    while True:
+                        mref = self.read_u29()
+                        if mref & 1:
+                            mlen = mref >> 1
+                            mn = self.data[self.pos:self.pos+mlen].decode('utf-8', errors='replace')
+                            self.pos += mlen
+                            if mn == '': break
+                        else: break
+                except: pass
+                return obj
+            return f"<obj{ref>>1}>"
+        return f"<amf3-0x{marker:02x}>"
+    def parse(self):
+        version = self.read_short()
+        hc = self.read_short(); headers = []
+        for _ in range(hc):
+            n = self.read_utf8(); mu = self.read_byte(); dl = self.read_long()
+            headers.append({'name': n, 'value': self.read_amf0()})
+        bc = self.read_short(); bodies = []
+        for _ in range(bc):
+            t = self.read_utf8(); r = self.read_utf8(); dl = self.read_long()
+            bodies.append({'target': t, 'response': r, 'data': self.read_amf0()})
+        return {'version': version, 'headers': headers, 'bodies': bodies}
+
+class AMFWriter:
+    def __init__(self): self.data = bytearray()
+    def wb(self, v): self.data.append(v & 0xFF)
+    def ws(self, v): self.data.extend(struct.pack('>H', v))
+    def wl(self, v): self.data.extend(struct.pack('>I', v))
+    def wd(self, v): self.data.extend(struct.pack('>d', v))
+    def wstr(self, s):
+        e = s.encode('utf-8'); self.ws(len(e)); self.data.extend(e)
+    def w_num(self, v): self.wb(0); self.wd(v)
+    def w_str(self, v): self.wb(2); self.wstr(v)
+    def w_bool(self, v): self.wb(1); self.wb(1 if v else 0)
+    def w_null(self): self.wb(5)
+    def w_obj(self, obj):
+        self.wb(3)
+        for k, v in obj.items():
+            self.wstr(k)
+            if isinstance(v, bool): self.w_bool(v)
+            elif isinstance(v, (int, float)): self.w_num(v)
+            elif isinstance(v, str): self.w_str(v)
+            elif v is None: self.w_null()
+            elif isinstance(v, dict): self.w_obj(v)
+            elif isinstance(v, list): self.w_arr(v)
+            else: self.w_str(str(v))
+        self.wstr(''); self.wb(9)
+    def w_arr(self, arr):
+        self.wb(0x0A); self.wl(len(arr))
+        for i in arr:
+            if isinstance(i, bool): self.w_bool(i)
+            elif isinstance(i, (int, float)): self.w_num(i)
+            elif isinstance(i, str): self.w_str(i)
+            elif i is None: self.w_null()
+            elif isinstance(i, dict): self.w_obj(i)
+            else: self.w_str(str(i))
+    def w_typed(self, cn, obj):
+        self.wb(0x10); self.wstr(cn)
+        for k, v in obj.items():
+            self.wstr(k)
+            if isinstance(v, bool): self.w_bool(v)
+            elif isinstance(v, (int, float)): self.w_num(v)
+            elif isinstance(v, str): self.w_str(v)
+            elif v is None: self.w_null()
+            elif isinstance(v, dict): self.w_obj(v)
+            elif isinstance(v, list): self.w_arr(v)
+            else: self.w_str(str(v))
+        self.wstr(''); self.wb(9)
+    def build(self, response_uri, result):
+        self.ws(0); self.ws(0); self.ws(1)
+        self.wstr(response_uri); self.wstr(''); self.wl(0)
+        if isinstance(result, dict) and '_class' in result:
+            cn = result.pop('_class'); self.w_typed(cn, result)
+        elif isinstance(result, dict): self.w_obj(result)
+        elif isinstance(result, str): self.w_str(result)
+        elif isinstance(result, (int, float)): self.w_num(result)
+        else: self.w_null()
+        return bytes(self.data)
+
+def mock_response(method):
+    if method == 'handshake':
+        return {'_class': 'com.lexialearning.lrs.api.HandshakeResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'login':
+        return {'_class': 'com.lexialearning.lrs.api.LoginResponseVO', 'errorCode': 0, 'errorMessage': None,
+                'authToken': 'mock_auth_token_12345', 'studentId': 1, 'personName': 'Test Student',
+                'language': 'english', 'region': 'us', 'purpose': 'course', 'currentPhaseId': 'a01',
+                'currentUnitIdList': [], 'isAuditMode': False, 'isUnhidePassword': False,
+                'irtForm': '', 'startUnit': 'a01A_bascateg_01', 'classList': [], 'grade': 'K',
+                'teacher': 'Teacher', 'showWarmup': True, 'secondsSinceLastLogin': 0, 'warmupHighScore': 0}
+    elif method == 'verifySiteId':
+        return {'_class': 'com.lexialearning.lrs.api.VerifySiteIdResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'unitStatus':
+        return {'_class': 'com.lexialearning.lrs.api.UnitStatusResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'stepEnd':
+        return {'_class': 'com.lexialearning.lrs.api.StepEndResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'saveUnitData':
+        return {'_class': 'com.lexialearning.lrs.api.ResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'saveWarmupScore':
+        return {'_class': 'com.lexialearning.lrs.api.SaveWarmupScoreResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'logout':
+        return {'_class': 'com.lexialearning.lrs.api.LogoutResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'logEvent':
+        return {'_class': 'com.lexialearning.lrs.api.LoggingResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'getCustomerFromTeacher':
+        return {'_class': 'com.lexialearning.lrs.api.TeacherResponseVO', 'errorCode': 0, 'errorMessage': None}
+    elif method == 'resetStudent':
+        return {'_class': 'com.lexialearning.lrs.api.ResponseVO', 'errorCode': 0, 'errorMessage': None}
+    return {'_class': 'com.lexialearning.lrs.api.ResponseVO', 'errorCode': 0, 'errorMessage': None}
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args): pass
+    def do_POST(self):
+        cl = int(self.headers.get('Content-Length', 0)); body = self.rfile.read(cl)
+        method = 'unknown'
+        try:
+            r = AMFReader(body); p = r.parse()
+            if p['bodies']:
+                t = p['bodies'][0]['target']; method = t.split('.')[-1]
+            print(f"[AMF] Method: {method}, Body: {json.dumps(p, default=str)[:500]}")
+        except Exception as e:
+            print(f"[AMF] Parse error: {e}")
+        mock = mock_response(method)
+        w = AMFWriter(); resp = w.build('/1/onResult', mock)
+        with open('C:\\amf-log.txt', 'a') as f:
+            f.write(f"\n=== {method} ===\nReq: {body[:200].hex()}\nResp: {resp[:200].hex()}\n")
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/x-amf')
+        self.send_header('Content-Length', len(resp))
+        self.end_headers(); self.wfile.write(resp)
+    def do_GET(self):
+        self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers()
+        self.wfile.write(b"AMF Mock Server Running")
+
+if __name__ == '__main__':
+    port = 443
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain('C:\\cert.pem', 'C:\\key.pem')
+    s = HTTPServer(('0.0.0.0', port), Handler)
+    s.socket = ctx.wrap_socket(s.socket, server_side=True)
+    print(f"AMF Mock Server on https://0.0.0.0:{port}")
+    s.serve_forever()
+'@
+          $serverCode | Out-File -FilePath "C:\amf_server.py" -Encoding UTF8
+          Write-Host "AMF server script created"
+
+      - name: Create self-signed SSL certificate
+        if: github.event.inputs.mode == 'mock-server'
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -DnsName "student.mylexia.com", "*.mylexia.com" `
+            -CertStoreLocation "Cert:\LocalMachine\My" `
+            -KeyUsage DigitalSignature,KeyEncipherment -KeyAlgorithm RSA -KeyLength 2048 `
+            -NotAfter (Get-Date).AddYears(1)
           
-          # Also start a DNS capture
-          netsh dns show tracing 2>$null
+          # Export to PEM for Python
+          $pfx = "C:\cert.pfx"; $pwd = "test123"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString $pwd -AsPlainText -Force)
+          openssl pkcs12 -in $pfx -nocerts -nodes -out C:\key.pem -passin pass:$pwd 2>&1
+          openssl pkcs12 -in $pfx -nokeys -out C:\cert.pem -passin pass:$pwd 2>&1
           
-          # Clear DNS cache
+          # Trust the cert
+          Export-Certificate -Cert $cert -FilePath "C:\lexia-ca.cer"
+          Import-Certificate -FilePath "C:\lexia-ca.cer" -CertStoreLocation "Cert:\LocalMachine\Root"
+          
+          Write-Host "SSL cert created and trusted"
+
+      - name: Redirect hosts file
+        if: github.event.inputs.mode == 'mock-server'
+        shell: pwsh
+        run: |
+          Add-Content "C:\Windows\System32\drivers\etc\hosts" "`n127.0.0.1 student.mylexia.com"
+          Add-Content "C:\Windows\System32\drivers\etc\hosts" "127.0.0.1 www.mylexia.com"
           ipconfig /flushdns
+          Write-Host "Hosts redirected"
 
-      - name: Run app and capture network traffic
+      - name: Start mock AMF server
+        if: github.event.inputs.mode == 'mock-server'
         shell: pwsh
         run: |
-          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
-          Write-Host "Launching: $exe"
-          
-          $proc = Start-Process -FilePath $exe -PassThru
-          Write-Host "Process started, PID: $($proc.Id)"
-          
-          # Monitor network connections every 2 seconds for 30 seconds
-          Write-Host "`n=== Network connections log ==="
-          for ($i = 0; $i -lt 15; $i++) {
-            Start-Sleep -Seconds 2
-            Write-Host "`n--- T+$($i*2)s ---"
-            
-            # Active TCP connections from the app
-            $conns = Get-NetTCPConnection -OwningProcess $proc.Id -ErrorAction SilentlyContinue
-            foreach ($c in $conns) {
-              $remote = Get-NetIPConfiguration | Where-Object { $_.IPv4Address.IPAddress -ne $c.LocalAddress }
-              Write-Host "  TCP: $($c.LocalAddress):$($c.LocalPort) -> $($c.RemoteAddress):$($c.RemotePort) [$($c.State)]"
-            }
-            
-            # Also check all ESTABLISHED connections
-            $established = Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -ne '127.0.0.1' -and $_.RemoteAddress -ne '::1' }
-            foreach ($c in $established) {
-              Write-Host "  ESTABLISHED: $($c.LocalAddress):$($c.LocalPort) -> $($c.RemoteAddress):$($c.RemotePort)"
-            }
-          }
-          
-          # Check DNS cache
-          Write-Host "`n=== DNS Cache (looking for lexia-related entries) ==="
-          $dns = ipconfig /displaydns 2>&1
-          $dnsLines = $dns -split "`n" | Where-Object { $_ -match 'lexia|core5|learning|literacy' -or $_ -match 'Record Name' -or $_ -match 'A \(Host\) Record' }
-          foreach ($line in $dnsLines) {
-            Write-Host $line.Trim()
-          }
-          
-          # Get full DNS cache to file
-          ipconfig /displaydns > C:\dns-cache.txt 2>&1
-          
-          # Check hosts file
-          Write-Host "`n=== Hosts file ==="
-          Get-Content C:\Windows\System32\drivers\etc\hosts
-          
-          # Kill the app
-          Write-Host "`nStopping app..."
-          $proc | Stop-Process -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
+          Start-Process -FilePath "python" -ArgumentList "C:\amf_server.py" `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput "C:\amf-stdout.txt" `
+            -RedirectStandardError "C:\amf-stderr.txt"
+          Start-Sleep -Seconds 3
+          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
+          if (Test-Path C:\amf-stderr.txt) { Write-Host "Errors:"; Get-Content C:\amf-stderr.txt }
 
-      - name: Stop network capture
-        shell: pwsh
-        run: |
-          Write-Host "Stopping packet capture..."
-          pktmon stop
-          Write-Host "Capture stopped"
-          
-          # Convert to readable format
-          Write-Host "Converting capture..."
-          pktmon format C:\trace.etl -o C:\trace.txt 2>&1 | Select-Object -First 5
-          pktmon pcapng C:\trace.etl -o C:\trace.pcapng 2>&1 | Select-Object -First 5
-          
-          # Check file sizes
-          if (Test-Path C:\trace.etl) { Write-Host "ETL: $((Get-Item C:\trace.etl).Length) bytes" }
-          if (Test-Path C:\trace.txt) { Write-Host "TXT: $((Get-Item C:\trace.txt).Length) bytes" }
-          if (Test-Path C:\trace.pcapng) { Write-Host "PCAPNG: $((Get-Item C:\trace.pcapng).Length) bytes" }
-
-      - name: Extract all network-related info from logs
-        shell: pwsh
-        run: |
-          $outFile = "network-analysis.txt"
-          @"
-          ============================================
-          LEXIA CORE5 NETWORK ANALYSIS
-          $(Get-Date)
-          ============================================
-
-          === INSTALLED FILES LISTING ===
-          "@ | Out-File $outFile -Encoding UTF8
-          
-          $installDir = "C:\Program Files (x86)\Lexia Core5"
-          Get-ChildItem $installDir -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Add-Content $outFile
-          
-          @"
-          
-          === ALL CONFIG FILES CONTENT ===
-          "@ | Add-Content $outFile
-          
-          $configs = Get-ChildItem $installDir -Recurse -Include *.xml,*.json,*.ini,*.cfg,*.config,*.properties -ErrorAction SilentlyContinue
-          foreach ($f in $configs) {
-            "`n--- $($f.FullName) ---" | Add-Content $outFile
-            Get-Content $f.FullName -Raw | Add-Content $outFile
-          }
-          
-          @"
-          
-          === DNS CACHE ===
-          "@ | Add-Content $outFile
-          if (Test-Path C:\dns-cache.txt) { Get-Content C:\dns-cache.txt | Add-Content $outFile }
-          
-          # Show first 200 lines of trace
-          @"
-          
-          === PACKET CAPTURE (first 200 lines) ===
-          "@ | Add-Content $outFile
-          if (Test-Path C:\trace.txt) { Get-Content C:\trace.txt -TotalCount 200 | Add-Content $outFile }
-          
-          Write-Host "Network analysis saved"
-
-      - name: Upload network capture (pcapng)
-        uses: actions/upload-artifact@v4
-        with:
-          name: network-capture
-          path: |
-            C:\trace.pcapng
-            C:\trace.txt
-            C:\trace.etl
-            C:\dns-cache.txt
-          retention-days: 30
-          if-no-files-found: ignore
-
-      - name: Upload network analysis
-        uses: actions/upload-artifact@v4
-        with:
-          name: network-analysis
-          path: network-analysis.txt
-          retention-days: 30
-
-      - name: Upload portable package
-        uses: actions/upload-artifact@v4
-        with:
-          name: lexia-core5-portable
-          path: portable/
-          retention-days: 30
-
-      - name: Take screenshot
+      - name: Launch app and screenshot (mock server)
+        if: github.event.inputs.mode == 'mock-server'
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
-
+          
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
-          if (Test-Path $exe) {
-            $proc = Start-Process -FilePath $exe -PassThru
-            Start-Sleep -Seconds 20
+          $proc = Start-Process -FilePath $exe -PassThru
+          Write-Host "PID: $($proc.Id)"
+          Start-Sleep -Seconds 30
+          
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+          $bounds = $screen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+          $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          
+          New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
+          $bmp.Save("screenshots/lexia-mock-test.png")
+          $graphics.Dispose(); $bmp.Dispose()
+          Write-Host "Screenshot saved"
+          
+          Get-NetTCPConnection -OwningProcess $proc.Id -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
 
-            $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-            $bounds = $screen.Bounds
-            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-            $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+      - name: Upload AMF logs
+        if: github.event.inputs.mode == 'mock-server'
+        uses: actions/upload-artifact@v4
+        with:
+          name: amf-logs
+          path: |
+            C:\amf-log.txt
+            C:\amf-stdout.txt
+            C:\amf-stderr.txt
+          retention-days: 30
+          if-no-files-found: ignore
 
-            New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
-            $bmp.Save("screenshots/lexia-screenshot.png")
-            $graphics.Dispose()
-            $bmp.Dispose()
-            Write-Host "Screenshot saved"
-            $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+      - name: Upload mock test screenshots
+        if: github.event.inputs.mode == 'mock-server'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-test-screenshots
+          path: screenshots/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ============ BUILD MODE (default) ============
+      - name: Search config files for server URLs
+        if: github.event.inputs.mode != 'mock-server'
+        shell: pwsh
+        run: |
+          $installDir = "C:\Program Files (x86)\Lexia Core5"
+          $configFiles = Get-ChildItem $installDir -Recurse -Include *.xml,*.json,*.ini,*.cfg,*.config,*.properties -ErrorAction SilentlyContinue
+          foreach ($f in $configFiles) {
+            $relPath = $f.FullName.Replace($installDir, "")
+            $urls = [regex]::Matches((Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue), 'https?://[^\s<>"''`]+')
+            if ($urls.Count -gt 0) {
+              Write-Host "$relPath :"
+              foreach ($u in $urls) { Write-Host "  $($u.Value)" }
+            }
           }
 
+      - name: Take screenshot (build mode)
+        if: github.event.inputs.mode != 'mock-server'
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 20
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+          $bounds = $screen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+          $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
+          $bmp.Save("screenshots/lexia-screenshot.png")
+          $graphics.Dispose(); $bmp.Dispose()
+          $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+
       - name: Upload screenshots
+        if: github.event.inputs.mode != 'mock-server'
         uses: actions/upload-artifact@v4
         with:
           name: lexia-screenshots
