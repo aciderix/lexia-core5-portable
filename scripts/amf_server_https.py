@@ -113,11 +113,7 @@ def enc_double(val):
     return bytes([0x05]) + struct.pack(">d", val)
 
 def enc_string(s, st=None):
-    if st and s in st:
-        ref_idx = st.index(s)
-        return bytes([0x06]) + encode_u29(ref_idx << 1)
-    if st:
-        st.append(s)
+    # Always encode as new string - no references (avoids string table sync issues)
     return bytes([0x06]) + encode_u29s_string(s)
 
 def enc_object(class_name, sealed_props, dynamic_props=None, st=None):
