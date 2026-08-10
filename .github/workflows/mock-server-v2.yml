@@ -41,20 +41,27 @@ jobs:
       - name: Setup hosts redirect and mock server
         shell: pwsh
         run: |
-          # Copy the HTTPS mock server
           Copy-Item "scripts/amf_server_https.py" "C:\amf_server.py"
-          Write-Host "Mock server copied"
-
-          # Add hosts file entry to redirect student.mylexia.com to localhost
+          
+          # Redirect ALL possible Lexia domains
           $hostsFile = "C:\Windows\System32\drivers\etc\hosts"
-          $entry = "`n127.0.0.1 student.mylexia.com`n127.0.0.1 dev10.lexialearning.com`n127.0.0.1 qa10.lexialearning.com"
-          Add-Content -Path $hostsFile -Value $entry
-          Write-Host "Hosts file updated"
-          Get-Content $hostsFile | Select-String "lexia"
-
-          # Check openssl availability
-          $openssl = Get-Command openssl -ErrorAction SilentlyContinue
-          Write-Host "OpenSSL available: $($openssl.Source)"
+          $entries = @(
+            "127.0.0.1 student.mylexia.com",
+            "127.0.0.1 dev10.lexialearning.com",
+            "127.0.0.1 qa10.lexialearning.com",
+            "127.0.0.1 www.mylexia.com",
+            "127.0.0.1 mylexia.com",
+            "127.0.0.1 api.lexialearning.com",
+            "127.0.0.1 student.lexialearning.com"
+          )
+          foreach ($entry in $entries) {
+            Add-Content -Path $hostsFile -Value $entry
+          }
+          Write-Host "Hosts file updated with all Lexia domains"
+          
+          # Check PHP availability
+          $php = Get-Command php -ErrorAction SilentlyContinue
+          Write-Host "PHP available: $($php.Source)"
 
       - name: Run mock server and app
         shell: pwsh
@@ -74,34 +81,29 @@ jobs:
           $serverJob = Start-Job -ScriptBlock { python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8 }
           Start-Sleep -Seconds 8
 
-          # Check server
           Write-Host "=== Server job state ==="
           Write-Host "Job status: $($serverJob.State)"
-          Write-Host "=== Server stdout ==="
           if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
           
-          # Check if port 443 is listening
           Write-Host "=== netstat 443 ==="
           netstat -an | Select-String ":443 "
 
-          # Launch app (ORIGINAL SWF, no patching!)
-          Write-Host "Launching LexiaCore5 (ORIGINAL SWF)..."
+          # Launch app
+          Write-Host "Launching LexiaCore5..."
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "App PID: $($proc.Id)"
           Start-Sleep -Seconds 15
 
-          # Check window
           $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
           if ($p) {
             Write-Host "Process alive! MainWindowHandle: $($p.MainWindowHandle)"
             Write-Host "MainWindowTitle: $($p.MainWindowTitle)"
-            
             if ($p.MainWindowHandle -ne 0) {
               $sw::ShowWindow($p.MainWindowHandle, 3) | Out-Null
               Start-Sleep -Milliseconds 500
               $fg::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-              Start-Sleep -Seconds 5
+              Start-Sleep -Seconds 3
             }
           } else {
             Write-Host "Process not found!"
@@ -115,49 +117,41 @@ jobs:
           $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
           $bmp.Save("screenshots\01-initial.png")
           $g.Dispose(); $bmp.Dispose()
-          Write-Host "Initial screenshot saved"
 
-          # Wait for app to try connecting
-          Start-Sleep -Seconds 10
-          
-          # Screenshot 2
-          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\02-after-wait.png")
-          $g.Dispose(); $bmp.Dispose()
-          Write-Host "Screenshot 2 saved"
+          # Wait and check for more requests
+          for ($i = 2; $i -le 10; $i++) {
+            Start-Sleep -Seconds 5
+            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save("screenshots\{0:D2}-delayed.png" -f $i)
+            $g.Dispose(); $bmp.Dispose()
+          }
 
-          # Try interacting: click center and type
-          Write-Host "Interacting..."
-          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 300)
+          # Try clicking and typing
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 384)
           Start-Sleep -Milliseconds 300
           $me::mouse_event(0x02, 0, 0, 0, 0)
           Start-Sleep -Milliseconds 100
           $me::mouse_event(0x04, 0, 0, 0, 0)
           Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("12345")
-          Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          [System.Windows.Forms.SendKeys]::SendWait("12345{TAB}password{ENTER}")
           Start-Sleep -Seconds 10
           
-          # Screenshot 3
           $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\03-after-input.png")
+          $bmp.Save("screenshots\11-after-input.png")
           $g.Dispose(); $bmp.Dispose()
-          Write-Host "Screenshot 3 saved"
 
-          # More screenshots
-          for ($i = 4; $i -le 7; $i++) {
+          # Final screenshots
+          for ($i = 12; $i -le 15; $i++) {
             Start-Sleep -Seconds 5
             $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-            $bmp.Save("screenshots\0$i-delayed.png")
+            $bmp.Save("screenshots\{0:D2}-final.png" -f $i)
             $g.Dispose(); $bmp.Dispose()
-            Write-Host "Screenshot $i saved"
           }
 
           # Results
