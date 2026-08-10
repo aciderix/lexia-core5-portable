@@ -10,142 +10,255 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache Lexia installer
+        id: cache-installer
+        uses: actions/cache@v4
+        with:
+          path: lexia-installer.exe
+          key: lexia-installer-v1.0
+
       - name: Download Lexia Core5 installer from release
+        if: steps.cache-installer.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # Use the GitHub API for private repos (Accept: application/octet-stream)
           $apiUrl = "https://api.github.com/repos/aciderix/lexia-core5-portable/releases/assets/508863891"
           $headers = @{
             "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
             "Accept" = "application/octet-stream"
           }
-          Write-Host "Downloading via API..."
+          Write-Host "Downloading installer..."
           Invoke-WebRequest -Uri $apiUrl -OutFile "lexia-installer.exe" -Headers $headers
           $size = (Get-Item "lexia-installer.exe").Length
-          Write-Host "Downloaded: $size bytes ($([math]::Round($size / 1MB, 1)) MB)"
-          if ($size -lt 100000000) {
-            Write-Host "ERROR: File too small, download may have failed"
-            exit 1
+          Write-Host "Downloaded: $size bytes"
+
+      - name: Check if already installed
+        id: check-install
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") {
+            Write-Host "Already installed, skipping installation"
+            echo "installed=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "installed=false" >> $env:GITHUB_OUTPUT
           }
 
       - name: Install Lexia Core5 silently
+        if: steps.check-install.outputs.installed != 'true'
         shell: pwsh
         run: |
-          # BitRock installer silent flags
           $proc = Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -PassThru
           Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
-      - name: Find installation directory
+      - name: Search config files for server URLs
         shell: pwsh
         run: |
-          # Search common install locations
-          $paths = @(
-            "C:\Program Files\Lexia*",
-            "C:\Program Files (x86)\Lexia*",
-            "C:\Program Files\Lexia Learning*",
-            "C:\Program Files (x86)\Lexia Learning*",
-            "$env:LOCALAPPDATA\Lexia*",
-            "$env:APPDATA\Lexia*",
-            "C:\ProgramData\Lexia*"
-          )
-
-          foreach ($path in $paths) {
-            $found = Get-Item $path -ErrorAction SilentlyContinue
-            if ($found) {
-              Write-Host "Found: $($found.FullName)"
+          $installDir = "C:\Program Files (x86)\Lexia Core5"
+          Write-Host "=== Searching for config files ==="
+          
+          # Find all config-like files
+          $configFiles = Get-ChildItem $installDir -Recurse -Include *.xml,*.json,*.ini,*.cfg,*.config,*.properties,*.txt,*.swf -ErrorAction SilentlyContinue
+          
+          foreach ($f in $configFiles) {
+            $relPath = $f.FullName.Replace($installDir, "")
+            Write-Host "`n--- $relPath ($($f.Length) bytes) ---"
+            
+            # For text files, show content
+            if ($f.Length -lt 50000) {
+              $content = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
+              if ($content) {
+                # Look for URLs, server names, domains
+                $urls = [regex]::Matches($content, '(https?://[^\s<>"''`]+|[\w-]+\.(com|net|org|io|co)[^\s<>"''`]*)')
+                if ($urls.Count -gt 0) {
+                  Write-Host "  URLs found:"
+                  foreach ($u in $urls) { Write-Host "    $($u.Value)" }
+                }
+                
+                # Show first 500 chars of text configs
+                if ($f.Extension -in @('.xml','.json','.ini','.cfg','.config','.properties','.txt')) {
+                  Write-Host "  Content preview:"
+                  Write-Host $content.Substring(0, [Math]::Min(500, $content.Length))
+                }
+              }
+            } else {
+              Write-Host "  (binary, $($f.Length) bytes)"
+            }
+          }
+          
+          # Also search for domain names in binary files
+          Write-Host "`n=== Searching binaries for server URLs ==="
+          $binaries = Get-ChildItem $installDir -Recurse -Include *.exe,*.dll,*.swf -ErrorAction SilentlyContinue
+          foreach ($b in $binaries) {
+            $bytes = [System.IO.File]::ReadAllBytes($b.FullName)
+            $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+            $urls = [regex]::Matches($text, '(https?://[^\s\x00-\x1f"''<>]+)')
+            $domains = [regex]::Matches($text, '([\w-]+\.lexia[^\s\x00-\x1f"''<>]*)')
+            $allMatches = $urls + $domains | Select-Object -Unique -Property Value
+            if ($allMatches) {
+              Write-Host "`n  $($b.Name):"
+              foreach ($m in $allMatches | Select-Object -First 20) {
+                Write-Host "    $($m.Value)"
+              }
             }
           }
 
-          # Also check registry
-          $reg = @(
-            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-            "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
-          )
-          foreach ($r in $reg) {
-            Get-ItemProperty $r -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*Lexia*" } | ForEach-Object {
-              Write-Host "Registry: $($_.DisplayName) -> $($_.InstallLocation)"
-            }
-          }
-
-      - name: Locate and copy installation files
+      - name: Start network capture
         shell: pwsh
         run: |
-          $installDirs = @(
-            "C:\Program Files (x86)\Lexia Learning",
-            "C:\Program Files\Lexia Learning",
-            "C:\Program Files (x86)\Lexia",
-            "C:\Program Files\Lexia"
-          )
+          # Start packet capture with pktmon (built into Windows 10+)
+          Write-Host "Starting packet capture..."
+          pktmon start --capture --comp nics -f C:\trace.etl
+          Write-Host "Packet capture started"
+          
+          # Also start a DNS capture
+          netsh dns show tracing 2>$null
+          
+          # Clear DNS cache
+          ipconfig /flushdns
 
-          $installDir = $null
-          foreach ($dir in $installDirs) {
-            if (Test-Path $dir) {
-              $installDir = $dir
-              break
-            }
-          }
-
-          if (-not $installDir) {
-            $installDir = (Get-ChildItem "C:\Program Files*\Lexia*" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          }
-
-          if ($installDir) {
-            Write-Host "Install dir: $installDir"
-            New-Item -ItemType Directory -Force -Path "portable/LexiaCore5" | Out-Null
-            Copy-Item -Path "$installDir\*" -Destination "portable/LexiaCore5/" -Recurse -Force
-            Write-Host "Copied installation files"
-          } else {
-            Write-Host "ERROR: Could not find installation directory"
-            Get-ChildItem "C:\Program Files*" -Directory | Where-Object { $_.Name -like "*Lexia*" -or $_.Name -like "*lexia*" }
-            Get-ChildItem "C:\Program Files*" -Directory | Where-Object { $_.Name -like "*Adobe*" }
-            exit 1
-          }
-
-      - name: Copy Adobe AIR runtime (if needed)
+      - name: Run app and capture network traffic
         shell: pwsh
         run: |
-          $airPaths = @(
-            "C:\Program Files (x86)\Common Files\Adobe\AIR",
-            "C:\Program Files\Common Files\Adobe\AIR"
-          )
-
-          foreach ($airPath in $airPaths) {
-            if (Test-Path $airPath) {
-              Write-Host "Found AIR runtime: $airPath"
-              New-Item -ItemType Directory -Force -Path "portable/AdobeAIR" | Out-Null
-              Copy-Item -Path "$airPath\*" -Destination "portable/AdobeAIR/" -Recurse -Force
-              break
+          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
+          Write-Host "Launching: $exe"
+          
+          $proc = Start-Process -FilePath $exe -PassThru
+          Write-Host "Process started, PID: $($proc.Id)"
+          
+          # Monitor network connections every 2 seconds for 30 seconds
+          Write-Host "`n=== Network connections log ==="
+          for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 2
+            Write-Host "`n--- T+$($i*2)s ---"
+            
+            # Active TCP connections from the app
+            $conns = Get-NetTCPConnection -OwningProcess $proc.Id -ErrorAction SilentlyContinue
+            foreach ($c in $conns) {
+              $remote = Get-NetIPConfiguration | Where-Object { $_.IPv4Address.IPAddress -ne $c.LocalAddress }
+              Write-Host "  TCP: $($c.LocalAddress):$($c.LocalPort) -> $($c.RemoteAddress):$($c.RemotePort) [$($c.State)]"
+            }
+            
+            # Also check all ESTABLISHED connections
+            $established = Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -ne '127.0.0.1' -and $_.RemoteAddress -ne '::1' }
+            foreach ($c in $established) {
+              Write-Host "  ESTABLISHED: $($c.LocalAddress):$($c.LocalPort) -> $($c.RemoteAddress):$($c.RemotePort)"
             }
           }
+          
+          # Check DNS cache
+          Write-Host "`n=== DNS Cache (looking for lexia-related entries) ==="
+          $dns = ipconfig /displaydns 2>&1
+          $dnsLines = $dns -split "`n" | Where-Object { $_ -match 'lexia|core5|learning|literacy' -or $_ -match 'Record Name' -or $_ -match 'A \(Host\) Record' }
+          foreach ($line in $dnsLines) {
+            Write-Host $line.Trim()
+          }
+          
+          # Get full DNS cache to file
+          ipconfig /displaydns > C:\dns-cache.txt 2>&1
+          
+          # Check hosts file
+          Write-Host "`n=== Hosts file ==="
+          Get-Content C:\Windows\System32\drivers\etc\hosts
+          
+          # Kill the app
+          Write-Host "`nStopping app..."
+          $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
 
-      - name: Create launcher script
+      - name: Stop network capture
         shell: pwsh
         run: |
+          Write-Host "Stopping packet capture..."
+          pktmon stop
+          Write-Host "Capture stopped"
+          
+          # Convert to readable format
+          Write-Host "Converting capture..."
+          pktmon format C:\trace.etl -o C:\trace.txt 2>&1 | Select-Object -First 5
+          pktmon pcapng C:\trace.etl -o C:\trace.pcapng 2>&1 | Select-Object -First 5
+          
+          # Check file sizes
+          if (Test-Path C:\trace.etl) { Write-Host "ETL: $((Get-Item C:\trace.etl).Length) bytes" }
+          if (Test-Path C:\trace.txt) { Write-Host "TXT: $((Get-Item C:\trace.txt).Length) bytes" }
+          if (Test-Path C:\trace.pcapng) { Write-Host "PCAPNG: $((Get-Item C:\trace.pcapng).Length) bytes" }
+
+      - name: Extract all network-related info from logs
+        shell: pwsh
+        run: |
+          $outFile = "network-analysis.txt"
           @"
-          @echo off
-          :: Lexia Core5 Portable Launcher
-          set SCRIPT_DIR=%~dp0
-          if exist "`${SCRIPT_DIR}AdobeAIR" (
-            set AIR_ROOT=`${SCRIPT_DIR}AdobeAIR
-          )
-          start "" "`${SCRIPT_DIR}LexiaCore5\LexiaCore5.exe"
-          "@ | Out-File -FilePath "portable/LaunchLexia.bat" -Encoding ASCII
+          ============================================
+          LEXIA CORE5 NETWORK ANALYSIS
+          $(Get-Date)
+          ============================================
 
-      - name: Take screenshots of installed app
+          === INSTALLED FILES LISTING ===
+          "@ | Out-File $outFile -Encoding UTF8
+          
+          $installDir = "C:\Program Files (x86)\Lexia Core5"
+          Get-ChildItem $installDir -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Add-Content $outFile
+          
+          @"
+          
+          === ALL CONFIG FILES CONTENT ===
+          "@ | Add-Content $outFile
+          
+          $configs = Get-ChildItem $installDir -Recurse -Include *.xml,*.json,*.ini,*.cfg,*.config,*.properties -ErrorAction SilentlyContinue
+          foreach ($f in $configs) {
+            "`n--- $($f.FullName) ---" | Add-Content $outFile
+            Get-Content $f.FullName -Raw | Add-Content $outFile
+          }
+          
+          @"
+          
+          === DNS CACHE ===
+          "@ | Add-Content $outFile
+          if (Test-Path C:\dns-cache.txt) { Get-Content C:\dns-cache.txt | Add-Content $outFile }
+          
+          # Show first 200 lines of trace
+          @"
+          
+          === PACKET CAPTURE (first 200 lines) ===
+          "@ | Add-Content $outFile
+          if (Test-Path C:\trace.txt) { Get-Content C:\trace.txt -TotalCount 200 | Add-Content $outFile }
+          
+          Write-Host "Network analysis saved"
+
+      - name: Upload network capture (pcapng)
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-capture
+          path: |
+            C:\trace.pcapng
+            C:\trace.txt
+            C:\trace.etl
+            C:\dns-cache.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload network analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-analysis
+          path: network-analysis.txt
+          retention-days: 30
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lexia-core5-portable
+          path: portable/
+          retention-days: 30
+
+      - name: Take screenshot
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
 
-          $exe = Get-ChildItem "portable/LexiaCore5" -Filter "LexiaCore5.exe" -Recurse | Select-Object -First 1
-          if (-not $exe) {
-            $exe = Get-ChildItem "C:\Program Files*\Lexia*" -Filter "LexiaCore5.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          }
-          if ($exe) {
-            Write-Host "Launching: $($exe.FullName)"
-            $proc = Start-Process -FilePath $exe.FullName -PassThru
+          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
+          if (Test-Path $exe) {
+            $proc = Start-Process -FilePath $exe -PassThru
             Start-Sleep -Seconds 20
 
             $screen = [System.Windows.Forms.Screen]::PrimaryScreen
@@ -154,24 +267,13 @@ jobs:
             $graphics = [System.Drawing.Graphics]::FromImage($bmp)
             $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
 
-            $screenshotPath = "screenshots"
-            New-Item -ItemType Directory -Force -Path $screenshotPath | Out-Null
-            $bmp.Save("$screenshotPath/lexia-screenshot.png")
+            New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
+            $bmp.Save("screenshots/lexia-screenshot.png")
             $graphics.Dispose()
             $bmp.Dispose()
-
             Write-Host "Screenshot saved"
             $proc | Stop-Process -Force -ErrorAction SilentlyContinue
-          } else {
-            Write-Host "No exe found to screenshot"
           }
-
-      - name: Upload portable package
-        uses: actions/upload-artifact@v4
-        with:
-          name: lexia-core5-portable
-          path: portable/
-          retention-days: 30
 
       - name: Upload screenshots
         uses: actions/upload-artifact@v4
