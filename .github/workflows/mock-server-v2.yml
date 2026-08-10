@@ -1,0 +1,149 @@
+name: Mock Server Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run mode
+        required: false
+        default: mock-server
+        type: string
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Lexia installer
+        id: cache-installer
+        uses: actions/cache@v4
+        with:
+          path: lexia-installer.exe
+          key: lexia-installer-v1.0
+
+      - name: Download Lexia Core5 installer from release
+        if: steps.cache-installer.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $apiUrl = "https://api.github.com/repos/aciderix/lexia-core5-portable/releases/assets/508863891"
+          $headers = @{
+            "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
+            "Accept" = "application/octet-stream"
+          }
+          Invoke-WebRequest -Uri $apiUrl -OutFile "lexia-installer.exe" -Headers $headers
+
+      - name: Check if already installed
+        id: check-install
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") {
+            echo "installed=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "installed=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Install Lexia Core5 silently
+        if: steps.check-install.outputs.installed != 'true'
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -PassThru
+          Write-Host "Installer exit code: $($proc.ExitCode)"
+          Start-Sleep -Seconds 15
+
+      - name: Upload complete PortalDesktop.swf
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortalDesktop-swf
+          path: "C:\\Program Files (x86)\\Lexia Core5\\PortalDesktop.swf"
+          retention-days: 30
+
+      - name: Copy AMF server script
+        shell: pwsh
+        run: |
+          Copy-Item "scripts/amf_server.py" "C:\amf_server.py"
+          Write-Host "AMF server script copied"
+
+      - name: Create self-signed SSL certificate
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -DnsName "student.mylexia.com", "*.mylexia.com" `
+            -CertStoreLocation "Cert:\LocalMachine\My" `
+            -KeyUsage DigitalSignature,KeyEncipherment -KeyAlgorithm RSA -KeyLength 2048 `
+            -NotAfter (Get-Date).AddYears(1)
+          
+          $pfx = "C:\cert.pfx"
+          $pwd = "test123"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString $pwd -AsPlainText -Force)
+          openssl pkcs12 -in $pfx -nocerts -nodes -out C:\key.pem -passin pass:$pwd 2>&1
+          openssl pkcs12 -in $pfx -nokeys -out C:\cert.pem -passin pass:$pwd 2>&1
+          
+          Export-Certificate -Cert $cert -FilePath "C:\lexia-ca.cer"
+          Import-Certificate -FilePath "C:\lexia-ca.cer" -CertStoreLocation "Cert:\LocalMachine\Root"
+          
+          Write-Host "SSL cert created and trusted"
+
+      - name: Redirect hosts file
+        shell: pwsh
+        run: |
+          Add-Content "C:\Windows\System32\drivers\etc\hosts" "`n127.0.0.1 student.mylexia.com"
+          Add-Content "C:\Windows\System32\drivers\etc\hosts" "127.0.0.1 www.mylexia.com"
+          ipconfig /flushdns
+          Write-Host "Hosts redirected"
+
+      - name: Start mock AMF server
+        shell: pwsh
+        run: |
+          Start-Process -FilePath "python" -ArgumentList "C:\amf_server.py" `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput "C:\amf-stdout.txt" `
+            -RedirectStandardError "C:\amf-stderr.txt"
+          Start-Sleep -Seconds 3
+          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
+          if (Test-Path C:\amf-stderr.txt) { Write-Host "Errors:"; Get-Content C:\amf-stderr.txt }
+
+      - name: Launch app and screenshot
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          
+          $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Write-Host "PID: $($proc.Id)"
+          Start-Sleep -Seconds 30
+          
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+          $bounds = $screen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+          $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          
+          New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
+          $bmp.Save("screenshots/lexia-mock-test.png")
+          $graphics.Dispose(); $bmp.Dispose()
+          Write-Host "Screenshot saved"
+          
+          Get-NetTCPConnection -OwningProcess $proc.Id -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+      - name: Upload AMF logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: amf-logs
+          path: |
+            C:\amf-log.txt
+            C:\amf-stdout.txt
+            C:\amf-stderr.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-test-screenshots
+          path: screenshots/
+          retention-days: 30
+          if-no-files-found: ignore
