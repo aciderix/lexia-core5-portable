@@ -1,0 +1,20 @@
+name: Mock Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run mode
+        required: false
+        default: mock-server
+        type: string
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Test
+        shell: pwsh
+        run: |
+          Write-Host "Mock server workflow triggered"
+          Write-Host "Mode: ${{ github.event.inputs.mode }}"
