@@ -38,7 +38,25 @@ jobs:
           Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
-      - name: Test app with ORIGINAL SWF (no patching)
+      - name: Setup hosts redirect and mock server
+        shell: pwsh
+        run: |
+          # Copy the HTTPS mock server
+          Copy-Item "scripts/amf_server_https.py" "C:\amf_server.py"
+          Write-Host "Mock server copied"
+
+          # Add hosts file entry to redirect student.mylexia.com to localhost
+          $hostsFile = "C:\Windows\System32\drivers\etc\hosts"
+          $entry = "`n127.0.0.1 student.mylexia.com`n127.0.0.1 dev10.lexialearning.com`n127.0.0.1 qa10.lexialearning.com"
+          Add-Content -Path $hostsFile -Value $entry
+          Write-Host "Hosts file updated"
+          Get-Content $hostsFile | Select-String "lexia"
+
+          # Check openssl availability
+          $openssl = Get-Command openssl -ErrorAction SilentlyContinue
+          Write-Host "OpenSSL available: $($openssl.Source)"
+
+      - name: Run mock server and app
         shell: pwsh
         run: |
           $code = '
@@ -49,21 +67,34 @@ jobs:
           # Win32 API
           $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
           $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
+          $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
 
-          # Launch app with ORIGINAL SWF (no patching)
-          Write-Host "Launching LexiaCore5 (ORIGINAL SWF, no patching)..."
+          # Start mock HTTPS AMF server
+          Write-Host "Starting mock HTTPS AMF server..."
+          $serverJob = Start-Job -ScriptBlock { python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8 }
+          Start-Sleep -Seconds 8
+
+          # Check server
+          Write-Host "=== Server job state ==="
+          Write-Host "Job status: $($serverJob.State)"
+          Write-Host "=== Server stdout ==="
+          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
+          
+          # Check if port 443 is listening
+          Write-Host "=== netstat 443 ==="
+          netstat -an | Select-String ":443 "
+
+          # Launch app (ORIGINAL SWF, no patching!)
+          Write-Host "Launching LexiaCore5 (ORIGINAL SWF)..."
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "App PID: $($proc.Id)"
           Start-Sleep -Seconds 15
 
-          # Check process
+          # Check window
           $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
-          if (-not $p) {
-            Write-Host "PROCESS DIED! Exit: $($proc.ExitCode), HasExited: $($proc.HasExited)"
-          } else {
-            Write-Host "Process alive! PID: $($p.Id)"
-            Write-Host "MainWindowHandle: $($p.MainWindowHandle)"
+          if ($p) {
+            Write-Host "Process alive! MainWindowHandle: $($p.MainWindowHandle)"
             Write-Host "MainWindowTitle: $($p.MainWindowTitle)"
             
             if ($p.MainWindowHandle -ne 0) {
@@ -71,55 +102,99 @@ jobs:
               Start-Sleep -Milliseconds 500
               $fg::SetForegroundWindow($p.MainWindowHandle) | Out-Null
               Start-Sleep -Seconds 5
-            } else {
-              Write-Host "No window handle. Waiting more..."
-              Start-Sleep -Seconds 10
-              $p2 = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
-              if ($p2) {
-                Write-Host "After 10s more - MainWindowHandle: $($p2.MainWindowHandle)"
-                Write-Host "After 10s more - MainWindowTitle: $($p2.MainWindowTitle)"
-              }
             }
+          } else {
+            Write-Host "Process not found!"
           }
 
-          # Screenshot
+          # Screenshot 1
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
           $bounds = $screen.Bounds
           $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\01-original-swf.png")
+          $bmp.Save("screenshots\01-initial.png")
           $g.Dispose(); $bmp.Dispose()
-          Write-Host "Screenshot saved"
+          Write-Host "Initial screenshot saved"
 
-          # Wait and take more
-          for ($i = 2; $i -le 4; $i++) {
-            Start-Sleep -Seconds 10
-            $p3 = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
-            if ($p3) {
-              Write-Host "Check $i - Handle: $($p3.MainWindowHandle), Title: $($p3.MainWindowTitle)"
-            } else {
-              Write-Host "Check $i - Process gone"
-            }
+          # Wait for app to try connecting
+          Start-Sleep -Seconds 10
+          
+          # Screenshot 2
+          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bmp.Save("screenshots\02-after-wait.png")
+          $g.Dispose(); $bmp.Dispose()
+          Write-Host "Screenshot 2 saved"
+
+          # Try interacting: click center and type
+          Write-Host "Interacting..."
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 300)
+          Start-Sleep -Milliseconds 300
+          $me::mouse_event(0x02, 0, 0, 0, 0)
+          Start-Sleep -Milliseconds 100
+          $me::mouse_event(0x04, 0, 0, 0, 0)
+          Start-Sleep -Milliseconds 500
+          [System.Windows.Forms.SendKeys]::SendWait("12345")
+          Start-Sleep -Milliseconds 500
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep -Seconds 10
+          
+          # Screenshot 3
+          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bmp.Save("screenshots\03-after-input.png")
+          $g.Dispose(); $bmp.Dispose()
+          Write-Host "Screenshot 3 saved"
+
+          # More screenshots
+          for ($i = 4; $i -le 7; $i++) {
+            Start-Sleep -Seconds 5
             $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-            $bmp.Save("screenshots\0$i-check.png")
+            $bmp.Save("screenshots\0$i-delayed.png")
             $g.Dispose(); $bmp.Dispose()
+            Write-Host "Screenshot $i saved"
           }
+
+          # Results
+          Write-Host "=== AMF Server stdout ==="
+          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
+          Write-Host "=== AMF Log ==="
+          if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No AMF log" }
+          Write-Host "=== netstat ==="
+          netstat -an | Select-String ":443 "
+          Write-Host "=== Processes ==="
+          Get-Process -Name "python","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
           # Cleanup
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Stop-Job $serverJob -ErrorAction SilentlyContinue
+          Remove-Job $serverJob -ErrorAction SilentlyContinue
           '
           
-          $code | Out-File -FilePath "C:\test-original.ps1" -Encoding UTF8
-          & "C:\test-original.ps1"
+          $code | Out-File -FilePath "C:\interact.ps1" -Encoding UTF8
+          & "C:\interact.ps1"
+
+      - name: Upload AMF logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amf-logs
+          path: |
+            C:\amf-log.txt
+            C:\amf-stdout.txt
+          retention-days: 30
+          if-no-files-found: ignore
 
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: original-swf-test
+          name: mock-test-screenshots
           path: screenshots/
           retention-days: 30
           if-no-files-found: ignore
