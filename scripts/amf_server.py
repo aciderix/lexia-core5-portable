@@ -1,4 +1,4 @@
-import struct, sys, os, json, ssl, traceback
+import struct, sys, os, json, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 AMF0_NUMBER=0x00; AMF0_BOOLEAN=0x01; AMF0_STRING=0x02; AMF0_OBJECT=0x03
@@ -201,30 +201,40 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         cl = int(self.headers.get('Content-Length', 0)); body = self.rfile.read(cl)
         method = 'unknown'
+        target_uri = ''
         try:
             r = AMFReader(body); p = r.parse()
             if p['bodies']:
-                t = p['bodies'][0]['target']; method = t.split('.')[-1]
-            print("[AMF] Method: {}, Body: {}".format(method, json.dumps(p, default=str)[:500]))
+                target_uri = p['bodies'][0]['target']; method = target_uri.split('.')[-1]
+            print("[AMF] Method: {}, Target: {}".format(method, target_uri), flush=True)
+            print("[AMF] Body: {}".format(json.dumps(p, default=str)[:500]), flush=True)
         except Exception as e:
-            print("[AMF] Parse error: {}".format(e))
+            print("[AMF] Parse error: {}".format(e), flush=True)
+            traceback.print_exc()
+
         mock = mock_response(method)
         w = AMFWriter(); resp = w.build('/1/onResult', mock)
+
         with open('C:\\amf-log.txt', 'a') as f:
-            f.write("\n=== {} ===\nReq: {}\nResp: {}\n".format(method, body[:200].hex(), resp[:200].hex()))
+            f.write("\n=== {} ===\n".format(method))
+            f.write("Request hex ({}): {}\n".format(len(body), body[:200].hex()))
+            f.write("Response hex ({}): {}\n".format(len(resp), resp[:200].hex()))
+            f.write("Mock: {}\n".format(json.dumps(mock, default=str)))
+
         self.send_response(200)
         self.send_header('Content-Type', 'application/x-amf')
         self.send_header('Content-Length', len(resp))
         self.end_headers(); self.wfile.write(resp)
+        print("[AMF] Response sent ({} bytes)".format(len(resp)), flush=True)
+
     def do_GET(self):
-        self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers()
-        self.wfile.write(b"AMF Mock Server Running")
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"AMF Mock Server Running on HTTP port 8080")
 
 if __name__ == '__main__':
-    port = 443
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain('C:\\cert.pem', 'C:\\key.pem')
+    port = 8080
     s = HTTPServer(('0.0.0.0', port), Handler)
-    s.socket = ctx.wrap_socket(s.socket, server_side=True)
-    print("AMF Mock Server on https://0.0.0.0:{}".format(port))
+    print("AMF Mock Server on http://0.0.0.0:{}".format(port), flush=True)
     s.serve_forever()
