@@ -41,7 +41,6 @@ jobs:
       - name: Setup PHP and AMFPHP
         shell: pwsh
         run: |
-          # Check if PHP is already available
           $php = Get-Command php -ErrorAction SilentlyContinue
           if ($php) {
             Write-Host "PHP already available: $($php.Source)"
@@ -50,78 +49,50 @@ jobs:
           } else {
             Write-Host "Installing PHP via chocolatey..."
             choco install php --no-progress -y
-            Refresh-Env
             $php = Get-Command php -ErrorAction SilentlyContinue
-            if ($php) {
-              Write-Host "PHP installed: $($php.Source)"
-            } else {
-              Write-Host "ERROR: PHP installation failed!"
-              exit 1
-            }
+            if (-not $php) { Write-Host "ERROR: PHP installation failed!"; exit 1 }
           }
           
-          # Download AMFPHP 2.2 from GitHub
           Write-Host "Downloading AMFPHP 2.x..."
-          $amfphpUrl = "https://github.com/silexlabs/amfphp-2.0/archive/refs/heads/master.zip"
-          try {
-            Invoke-WebRequest -Uri $amfphpUrl -OutFile "amfphp.zip" -ErrorAction Stop
-          } catch {
-            Write-Host "Failed to download from GitHub, trying alternative..."
-            # Try the releases page
-            $amfphpUrl = "https://github.com/silexlabs/amfphp-2.0/archive/refs/tags/2.2.zip"
-            Invoke-WebRequest -Uri $amfphpUrl -OutFile "amfphp.zip"
-          }
-          
+          Invoke-WebRequest -Uri "https://github.com/silexlabs/amfphp-2.0/archive/refs/heads/master.zip" -OutFile "amfphp.zip"
           Expand-Archive -Path "amfphp.zip" -DestinationPath "C:\amfphp-src" -Force
-          Write-Host "Extracted AMFPHP source"
           
-          # Find the extracted directory
           $amfphpDir = Get-ChildItem -Path "C:\amfphp-src" -Directory | Select-Object -First 1
-          Write-Host "AMFPHP directory: $($amfphpDir.FullName)"
-          
-          # Set up the server directory
           New-Item -ItemType Directory -Force -Path "C:\amfphp" | Out-Null
           Copy-Item -Path "$($amfphpDir.FullName)\*" -Destination "C:\amfphp" -Recurse -Force
           
-          # List the structure
-          Write-Host "=== AMFPHP structure ==="
-          Get-ChildItem -Path "C:\amfphp" -Recurse -Depth 2 | Select-Object FullName | ForEach-Object { Write-Host $_.FullName }
+          # Copy our service
+          Copy-Item "scripts/AMFClient.php" -Destination "C:\amfphp\Amfphp\Services\AMFClient.php" -Force
+          Write-Host "AMFClient.php copied"
           
-          # Copy our AMFClient service
-          $servicesDir = "C:\amfphp\Amfphp\Services"
-          if (-not (Test-Path $servicesDir)) {
-            # Try alternate path
-            $servicesDir = "C:\amfphp\Services"
-          }
-          if (-not (Test-Path $servicesDir)) {
-            # Create it
-            $servicesDir = "C:\amfphp\Amfphp\Services"
-            New-Item -ItemType Directory -Force -Path $servicesDir | Out-Null
-          }
-          Write-Host "Services directory: $servicesDir"
-          Copy-Item "scripts/AMFClient.php" -Destination "$servicesDir\AMFClient.php" -Force
-          Write-Host "AMFClient.php copied to services"
-          
-          # Check if index.php exists (the AMFPHP gateway)
-          $indexFile = "C:\amfphp\index.php"
-          if (-not (Test-Path $indexFile)) {
-            # Search for it
-            $found = Get-ChildItem -Path "C:\amfphp" -Filter "index.php" -Recurse
-            if ($found) {
-              $indexFile = $found[0].FullName
-              Write-Host "Found index.php at: $indexFile"
-            } else {
-              Write-Host "WARNING: No index.php found - will need to create one"
-            }
-          } else {
-            Write-Host "index.php found at: $indexFile"
-          }
-          
-          # Show the contents of index.php for debugging
+          # Verify index.php location
+          $indexFile = "C:\amfphp\Amfphp\index.php"
           if (Test-Path $indexFile) {
-            Write-Host "=== index.php contents ==="
-            Get-Content $indexFile
+            Write-Host "Gateway found at: $indexFile"
+          } else {
+            Write-Host "ERROR: No index.php found!"
+            exit 1
           }
+          
+          # Check for PHP 8.x compatibility issues in AMFPHP
+          Write-Host "=== Checking AMFPHP for PHP 8.x compat issues ==="
+          $compatIssues = @()
+          Get-ChildItem -Path "C:\amfphp\Amfphp" -Filter "*.php" -Recurse | ForEach-Object {
+            $content = Get-Content $_.FullName -Raw
+            if ($content -match '\beach\s*\(') { $compatIssues += "$($_.Name): uses each()" }
+            if ($content -match 'create_function\s*\(') { $compatIssues += "$($_.Name): uses create_function()" }
+            if ($content -match '\beach\s*\(') { 
+              Write-Host "  WARNING: $($_.FullName) uses each() - removed in PHP 8.0"
+              # Patch: replace each() with foreach
+            }
+          }
+          if ($compatIssues.Count -eq 0) {
+            Write-Host "  No obvious PHP 8.x compat issues found"
+          }
+          
+          # List services directory
+          Write-Host "=== Services directory ==="
+          Get-ChildItem "C:\amfphp\Amfphp\Services" | ForEach-Object { Write-Host "  $($_.Name)" }
 
       - name: Setup hosts redirect
         shell: pwsh
@@ -136,12 +107,8 @@ jobs:
             "127.0.0.1 api.lexialearning.com",
             "127.0.0.1 student.lexialearning.com"
           )
-          foreach ($entry in $entries) {
-            Add-Content -Path $hostsFile -Value $entry
-          }
+          foreach ($entry in $entries) { Add-Content -Path $hostsFile -Value $entry }
           Write-Host "Hosts file updated"
-          
-          # Copy proxy script
           Copy-Item "scripts/proxy.py" "C:\proxy.py" -Force
 
       - name: Run mock server and app
@@ -155,23 +122,34 @@ jobs:
           $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
           $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
 
-          # Start PHP built-in server (AMFPHP gateway)
+          # Start PHP built-in server with document root at C:\amfphp (so /Amfphp/index.php is accessible)
           Write-Host "Starting PHP server on port 8080..."
           $phpJob = Start-Job -ScriptBlock {
-            Set-Location C:\amfphp
             php -S 127.0.0.1:8080 -t C:\amfphp 2>&1 | Out-File C:\php-stdout.txt -Encoding UTF8
           }
           Start-Sleep -Seconds 3
           
-          # Test PHP server
-          Write-Host "Testing PHP server..."
+          # Test PHP server - access the AMFPHP gateway
+          Write-Host "Testing PHP server at /Amfphp/index.php..."
           try {
-            $testResp = Invoke-WebRequest -Uri "http://127.0.0.1:8080/" -UseBasicParsing -TimeoutSec 5
-            Write-Host "PHP server responded: $($testResp.StatusCode)"
+            $testResp = Invoke-WebRequest -Uri "http://127.0.0.1:8080/Amfphp/index.php" -UseBasicParsing -TimeoutSec 5
+            Write-Host "PHP server responded: $($testResp.StatusCode), length=$($testResp.Content.Length)"
           } catch {
-            Write-Host "PHP server test failed: $_"
-            # Check job output
-            if (Test-Path C:\php-stdout.txt) { Get-Content C:\php-stdout.txt }
+            Write-Host "PHP server test result: $_"
+          }
+          
+          # Also test with a POST (simulating AMF request)
+          Write-Host "Testing PHP with POST (AMF-like)..."
+          try {
+            $testResp2 = Invoke-WebRequest -Uri "http://127.0.0.1:8080/Amfphp/index.php" -Method POST -Body @(0x00, 0x00) -ContentType "application/x-amf" -UseBasicParsing -TimeoutSec 5
+            Write-Host "PHP POST responded: $($testResp2.StatusCode), length=$($testResp2.Content.Length)"
+          } catch {
+            Write-Host "PHP POST test result: $_"
+          }
+          
+          if (Test-Path C:\php-stdout.txt) {
+            Write-Host "=== PHP stdout (so far) ==="
+            Get-Content C:\php-stdout.txt
           }
 
           # Start Python HTTPS proxy
@@ -208,7 +186,6 @@ jobs:
             Write-Host "Process not found!"
           }
 
-          # Screenshots
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
           $bounds = $screen.Bounds
           
@@ -235,11 +212,11 @@ jobs:
           Write-Host "=== AMF/Proxy Log ==="
           if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No proxy log" }
           Write-Host "=== netstat ==="
-          netstat -an | Select-String ":443 "," :8080 "
+          netstat -an | Select-String ":443 ",":8080 "
           Write-Host "=== Processes ==="
           Get-Process -Name "python","php","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
-          # Find and copy PortalDesktop.log (AIR app log)
+          # Find and copy PortalDesktop.log
           Write-Host "=== Searching for PortalDesktop.log ==="
           $found = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
           if ($found) {
@@ -248,11 +225,10 @@ jobs:
               Copy-Item $f.FullName "C:\PortalDesktop.log" -Force
               Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
             }
-            # Print its contents!
             Write-Host "=== PortalDesktop.log contents ==="
             Get-Content "C:\PortalDesktop.log"
           } else {
-            Write-Host "PortalDesktop.log not found"
+            Write-Host "PortalDesktop.log not found, searching broader..."
             $found2 = Get-ChildItem -Path "C:\Users" -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
             if ($found2) {
               foreach ($f in $found2) {
