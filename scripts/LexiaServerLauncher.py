@@ -345,10 +345,84 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(resp)
 
     def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        req_path = urllib.parse.unquote(parsed.path)
+        clean_path = req_path[1:] if req_path.startswith('/') else req_path
+        
+        if req_path in ('/crossdomain.xml', 'crossdomain.xml'):
+            crossdomain = (
+                b'<?xml version="1.0"?>\n'
+                b'<!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd">\n'
+                b'<cross-domain-policy>\n'
+                b'  <allow-access-from domain="*" headers="*" secure="false" />\n'
+                b'  <site-control permitted-cross-domain-policies="all" />\n'
+                b'</cross-domain-policy>\n'
+            )
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/x-cross-domain-policy')
+            self.send_header('Content-Length', str(len(crossdomain)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(crossdomain)
+            return
+
+        content_root = r"C:\Program Files (x86)\Lexia Core5"
+        file_path = os.path.join(content_root, clean_path.replace('/', '\\'))
+        
+        if not os.path.isfile(file_path):
+            appdata = os.environ.get('APPDATA', '')
+            if appdata:
+                appdata_path = os.path.join(appdata, 'com.lexiareading.core5.desktop.us', 'Local Store', clean_path.replace('/', '\\'))
+                if os.path.isfile(appdata_path):
+                    file_path = appdata_path
+
+        if not os.path.isfile(file_path):
+            filename = os.path.basename(clean_path)
+            if filename:
+                for search_base in [content_root, os.environ.get('APPDATA', '')]:
+                    if search_base and os.path.exists(search_base):
+                        for root, dirs, files in os.walk(search_base):
+                            if filename in files:
+                                file_path = os.path.join(root, filename)
+                                break
+                        if os.path.isfile(file_path):
+                            break
+        
+        ext = os.path.splitext(clean_path)[1].lower()
+        if os.path.isfile(file_path):
+            try:
+                with open(file_path, 'rb') as f:
+                    file_data = f.read()
+                mimetypes_map = {
+                    '.mp3': 'audio/mpeg', '.swf': 'application/x-shockwave-flash',
+                    '.xml': 'application/xml', '.png': 'image/png', '.jpg': 'image/jpeg'
+                }
+                content_type = mimetypes_map.get(ext, 'application/octet-stream')
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(file_data)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(file_data)
+                return
+            except Exception: pass
+            
+        if ext == '.mp3':
+            # Minimal silent MP3 frame buffer to prevent Flash Error #1009
+            silent_mp3 = b'\xff\xfb\x90\xc4' + b'\x00' * 413
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Content-Length', str(len(silent_mp3)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(silent_mp3)
+            return
+
         resp = b'{"status":"ok"}'
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', len(resp))
+        self.send_header('Content-Length', str(len(resp)))
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(resp)
 

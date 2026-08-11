@@ -155,16 +155,35 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         
         # Try to serve content files from the local filesystem
-        # Remove leading slash and join with content root
         clean_path = req_path[1:] if req_path.startswith('/') else req_path
         file_path = os.path.join(CONTENT_ROOT, clean_path.replace('/', '\\'))
         
+        if not os.path.isfile(file_path):
+            appdata = os.environ.get('APPDATA', '')
+            if appdata:
+                appdata_path = os.path.join(appdata, 'com.lexiareading.core5.desktop.us', 'Local Store', clean_path.replace('/', '\\'))
+                if os.path.isfile(appdata_path):
+                    file_path = appdata_path
+
+        if not os.path.isfile(file_path):
+            filename = os.path.basename(clean_path)
+            if filename:
+                for search_base in [CONTENT_ROOT, os.environ.get('APPDATA', '')]:
+                    if search_base and os.path.exists(search_base):
+                        for root, dirs, files in os.walk(search_base):
+                            if filename in files:
+                                file_path = os.path.join(root, filename)
+                                log(f"  Found file via recursive search: {file_path}")
+                                break
+                        if os.path.isfile(file_path):
+                            break
+        
+        ext = os.path.splitext(clean_path)[1].lower()
         if os.path.isfile(file_path):
             try:
                 with open(file_path, 'rb') as f:
                     file_data = f.read()
                 
-                ext = os.path.splitext(file_path)[1].lower()
                 content_type = MIME_OVERRIDES.get(ext, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')
                 
                 self.send_response(200)
@@ -182,6 +201,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 if not head_only:
                     self.wfile.write(f'File serve error: {e}'.encode())
+        elif ext == '.mp3':
+            log(f"  Missing MP3 file ({req_path}) - serving silent MP3 fallback")
+            # Minimal 1-frame valid MP3 silence buffer (MPEG-1 Layer 3, 128 kbps, 44.1 kHz, stereo)
+            silent_mp3 = b'\xff\xfb\x90\xc4' + b'\x00' * 413
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Content-Length', str(len(silent_mp3)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(silent_mp3)
         else:
             log(f"  File not found: {file_path}")
             self.send_response(404)
