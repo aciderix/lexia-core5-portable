@@ -378,16 +378,23 @@ jobs:
           Start-Sleep -Seconds 5
           TakeScreenshot "09-after-categorizing-click.png"
 
-          # STEP 9: Click Next Arrow (bottom right corner: relX=853, relY=661)
+          # STEP 9: Click Next Arrow (bottom right corner: relX=853, relY=661) to return to Level 01 menu
           Write-Host "=== Clicking Next Arrow (bottom right) ==="
           ClickAt 853 661 "Next Arrow button"
           Start-Sleep -Seconds 5
-          TakeScreenshot "10-after-next-arrow-click.png"
+          TakeScreenshot "10-level01-menu.png"
 
-          Write-Host "=== Clicking Next Arrow second time ==="
-          ClickAt 853 661 "Next Arrow button 2"
+          # STEP 10: Click Rhyming activity card (relX=291, relY=375)
+          Write-Host "=== Clicking Rhyming activity card ==="
+          ClickAt 291 375 "Rhyming activity card"
           Start-Sleep -Seconds 5
-          TakeScreenshot "11-after-second-next.png"
+          TakeScreenshot "11-after-rhyming-click.png"
+
+          # STEP 11: Click Next Arrow in Rhyming activity
+          Write-Host "=== Clicking Next Arrow in Rhyming activity ==="
+          ClickAt 853 661 "Next Arrow button in Rhyming"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "12-after-rhyming-next.png"
 
           # STEP 10: Collect logs & cleanup
           Write-Host "=== AMF Log ==="
