@@ -147,11 +147,23 @@ jobs:
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
           $assetsDir = "$lexiaDir\assets_a"
           
-          # Directory junctions from assets_a/* to parent
+          # Directory junctions from assets_a/* to parent in install dir ($lexiaDir)
           Get-ChildItem $assetsDir -Directory | ForEach-Object {
             $target = Join-Path $lexiaDir $_.Name
             if (-not (Test-Path $target)) {
               cmd /c mklink /J "$target" "$($_.FullName)" 2>&1 | Out-Null
+            }
+          }
+          
+          # Directory junctions from assets_a/* to parent in AppData ($appDataDir)
+          $appDataDir = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
+          $appDataAssets = "$appDataDir\assets_a"
+          if (Test-Path $appDataAssets) {
+            Get-ChildItem $appDataAssets -Directory | ForEach-Object {
+              $target = Join-Path $appDataDir $_.Name
+              if (-not (Test-Path $target)) {
+                cmd /c mklink /J "$target" "$($_.FullName)" 2>&1 | Out-Null
+              }
             }
           }
           
