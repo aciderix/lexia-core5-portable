@@ -11,13 +11,15 @@ class AMFClient {
     
     /**
      * Handshake response - first call after CONNECT
+     * contentUrl uses HTTP so OSMF gets proper HTTPStatusEvent (code 200)
+     * The proxy intercepts these requests and serves local files
      */
     public function handshake($req = null) {
         $response = new stdClass();
         $response->_explicitType = 'com.lexialearning.lrs.api.HandshakeResponseVO';
         $response->errorCode = 0;
         $response->errorMessage = null;
-        $response->contentUrl = "app:/assets_a/";
+        $response->contentUrl = "https://student.mylexia.com/assets_a/";
         return $response;
     }
     
@@ -61,9 +63,9 @@ class AMFClient {
         $response->personName = "Admin Portable";
         $response->language = "en-US";
         $response->region = "us";
-        $response->contentUrl = "app:/assets_a/";
+        $response->contentUrl = "https://student.mylexia.com/assets_a/";
         $response->purpose = "course";
-        $response->currentPhaseId = "1";
+        $response->currentPhaseId = "a01";
         $response->currentUnitIdList = array();
         $response->isAuditMode = false;
         $response->isUnhidePassword = false;
@@ -83,6 +85,8 @@ class AMFClient {
     /**
      * Unit status - called when entering a level/unit
      * Returns UnitStatusResponseVO with empty progress for new student
+     * Uses integer status (1 = in_progress) and null for empty fields
+     * to prevent Flash from interpreting "" as a valid step ID
      */
     public function unitStatus($req = null) {
         $response = new stdClass();
@@ -92,10 +96,10 @@ class AMFClient {
         $response->errorKindList = array();
         $response->isStruggling = false;
         $response->roundLeader = 0;
-        $response->stepId = "";
-        $response->unitId = isset($req->unitId) ? $req->unitId : "";
-        $response->studentId = isset($req->studentId) ? $req->studentId : 1;
-        $response->status = "in_progress";
+        $response->stepId = null;
+        $response->unitId = isset($req->unitId) ? $req->unitId : "us_a01_bascateg_01";
+        $response->studentId = 1;
+        $response->status = 1;
         $response->progress = 0;
         $response->mastery = 0;
         $response->attempts = 0;
@@ -103,9 +107,9 @@ class AMFClient {
         $response->isPassed = false;
         $response->score = 0;
         $response->stepsCompleted = array();
-        $response->currentStep = "";
-        $response->skillData = array();
-        $response->sessionData = null;
+        $response->currentStep = null;
+        $response->skillData = new stdClass();
+        $response->sessionData = new stdClass();
         $response->currentLevel = 1;
         $response->placementLevel = 1;
         $response->isPlacement = false;
@@ -136,10 +140,11 @@ class AMFClient {
     
     /**
      * Get student data - returns student progress data
+     * Uses StudentResponseVO type for proper UI rendering
      */
     public function getStudentData($req = null) {
         $response = new stdClass();
-        $response->_explicitType = 'com.lexialearning.lrs.api.ResponseVO';
+        $response->_explicitType = 'com.lexialearning.lrs.api.StudentResponseVO';
         $response->errorCode = 0;
         $response->errorMessage = null;
         return $response;
@@ -176,12 +181,14 @@ class AMFClient {
     
     /**
      * Get program data - returns program configuration
+     * Uses ProgramDataResponseVO type for proper HUD rendering
      */
     public function getProgramData($req = null) {
         $response = new stdClass();
-        $response->_explicitType = 'com.lexialearning.lrs.api.ResponseVO';
+        $response->_explicitType = 'com.lexialearning.lrs.api.ProgramDataResponseVO';
         $response->errorCode = 0;
         $response->errorMessage = null;
+        $response->programData = new stdClass();
         return $response;
     }
     
