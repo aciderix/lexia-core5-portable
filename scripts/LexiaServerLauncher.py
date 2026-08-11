@@ -125,6 +125,63 @@ def place_sol_file():
         except Exception as e:
             print(f"[!] Impossible d'écrire CORE5.sol dans {d} : {e}")
 
+def fix_exercise_xml_and_junctions():
+    lexia_dir = r"C:\Program Files (x86)\Lexia Core5"
+    assets_dir = os.path.join(lexia_dir, "assets_a")
+    appdata = os.environ.get("APPDATA", "")
+    appdata_dir = os.path.join(appdata, "com.lexiareading.core5.desktop.us", "Local Store") if appdata else ""
+    
+    # 1. Directory junctions in Program Files
+    if os.path.exists(assets_dir):
+        for item in os.listdir(assets_dir):
+            item_path = os.path.join(assets_dir, item)
+            if os.path.isdir(item_path):
+                target = os.path.join(lexia_dir, item)
+                if not os.path.exists(target):
+                    try:
+                        subprocess.run(["cmd", "/c", "mklink", "/J", target, item_path], capture_output=True)
+                    except Exception: pass
+                    
+    # 2. Directory junctions in AppData
+    if appdata_dir:
+        appdata_assets = os.path.join(appdata_dir, "assets_a")
+        if os.path.exists(appdata_assets):
+            for item in os.listdir(appdata_assets):
+                item_path = os.path.join(appdata_assets, item)
+                if os.path.isdir(item_path):
+                    target = os.path.join(appdata_dir, item)
+                    if not os.path.exists(target):
+                        try:
+                            subprocess.run(["cmd", "/c", "mklink", "/J", target, item_path], capture_output=True)
+                        except Exception: pass
+
+    # 3. Fix exercise XML files dir attribute to "../../"
+    target_dirs = []
+    if os.path.exists(os.path.join(assets_dir, "xml_us")):
+        target_dirs.append(os.path.join(assets_dir, "xml_us"))
+    if appdata_dir and os.path.exists(os.path.join(appdata_dir, "assets_a", "xml_us")):
+        target_dirs.append(os.path.join(appdata_dir, "assets_a", "xml_us"))
+        
+    fixed_count = 0
+    import re
+    for tdir in target_dirs:
+        for root, dirs, files in os.walk(tdir):
+            for f in files:
+                if f.endswith(".xml"):
+                    fpath = os.path.join(root, f)
+                    try:
+                        with open(fpath, "r", encoding="utf-8", errors="ignore") as file:
+                            content = file.read()
+                        if 'dir=' in content:
+                            new_content = re.sub(r'dir="[^"]*"', 'dir="../../"', content)
+                            if new_content != content:
+                                with open(fpath, "w", encoding="utf-8") as file:
+                                    file.write(new_content)
+                                fixed_count += 1
+                    except Exception: pass
+    if fixed_count > 0:
+        print(f"[✓] Attribut dir corrigé (../../) dans {fixed_count} fichiers XML d'exercices.")
+
 def generate_cert(cert_dir):
     os.makedirs(cert_dir, exist_ok=True)
     cert_file = os.path.join(cert_dir, "cert.pem")
@@ -454,6 +511,7 @@ def main():
     
     apply_hosts_redirection()
     place_sol_file()
+    fix_exercise_xml_and_junctions()
     
     cert_dir = os.path.join(tempfile.gettempdir(), "lexia_certs")
     cert_file, key_file = generate_cert(cert_dir)
