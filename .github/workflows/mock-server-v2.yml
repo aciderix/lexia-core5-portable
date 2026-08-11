@@ -242,7 +242,7 @@ jobs:
           Start-Sleep -Seconds 5
 
           # Add mouse_event for clicking
-          $me = Add-Type -MemberDefinition "[DllImport(\"user32.dll\")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
+          $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
 
           # Click on "If you are a student or parent click here"
           # The app is 1024x768, student/parent link is typically in the lower-left area
