@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 HTTPS Proxy for Lexia Core5 AMFPHP.
-Handles SSL on port 443 and forwards all requests to PHP on port 8080.
-Does NOT touch the AMF content - PHP/AMFPHP handles all encoding.
+Handles SSL on port 443 and forwards AMF requests to PHP on port 8080.
+Also serves static content files (MP3, SWF, XML) from the local filesystem.
 """
 import http.server
 import ssl
@@ -11,8 +11,11 @@ import sys
 import subprocess
 import datetime
 import urllib.request
+import mimetypes
+import urllib.parse
 
 LOG_FILE = "C:\\amf-log.txt"
+CONTENT_ROOT = "C:\\Program Files (x86)\\Lexia Core5"
 
 def log(msg):
     ts = datetime.datetime.now().isoformat()
@@ -42,6 +45,17 @@ def generate_self_signed_cert():
 
 # AMFPHP 2.x gateway - index.php is in the Amfphp subdirectory
 PHP_BACKEND = "http://127.0.0.1:8080/Amfphp/index.php"
+
+# MIME types for content files
+MIME_OVERRIDES = {
+    '.mp3': 'audio/mpeg',
+    '.swf': 'application/x-shockwave-flash',
+    '.xml': 'application/xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+}
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
@@ -89,13 +103,55 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(f'Proxy error: {e}'.encode())
     
     def do_GET(self):
-        log(f"PROXY: GET {self.path}")
-        resp = b'{"status":"ok","proxy":"running"}'
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', len(resp))
-        self.end_headers()
-        self.wfile.write(resp)
+        log(f"=== PROXY: GET {self.path} ===")
+        
+        # Parse the path
+        parsed = urllib.parse.urlparse(self.path)
+        req_path = urllib.parse.unquote(parsed.path)
+        
+        # Skip AMF gateway requests
+        if req_path.startswith('/clientapi/'):
+            resp = b'{"status":"ok","proxy":"running"}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', len(resp))
+            self.end_headers()
+            self.wfile.write(resp)
+            return
+        
+        # Try to serve content files from the local filesystem
+        # Remove leading slash and join with content root
+        if req_path.startswith('/'):
+            req_path = req_path[1:]
+        
+        file_path = os.path.join(CONTENT_ROOT, req_path.replace('/', '\\'))
+        
+        if os.path.isfile(file_path):
+            try:
+                with open(file_path, 'rb') as f:
+                    file_data = f.read()
+                
+                ext = os.path.splitext(file_path)[1].lower()
+                content_type = MIME_OVERRIDES.get(ext, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')
+                
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', len(file_data))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(file_data)
+                log(f"  Served file: {file_path} ({len(file_data)} bytes, {content_type})")
+            except Exception as e:
+                log(f"  File serve error: {e}")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f'File serve error: {e}'.encode())
+        else:
+            log(f"  File not found: {file_path}")
+            self.send_response(404)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'Not found')
     
     def log_message(self, format, *args):
         pass
