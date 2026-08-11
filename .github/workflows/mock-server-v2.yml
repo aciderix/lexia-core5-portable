@@ -236,17 +236,57 @@ jobs:
             Get-Content $_.FullName | ForEach-Object { Write-Host $_ }
           }
           
-      - name: Create setup.properties with correct contentURL
+      - name: Fix content paths and dump AssetManifest
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
-          # The app reads setup.properties from File.applicationDirectory
-          # contentURL defaults to URLHelper.getParent(url) = app:/ (parent of SWF)
-          # But content is in app:/assets_a/ so we override it
-          $setupContent = "contentURL=app:/assets_a/`n"
-          Set-Content -Path "$lexiaDir\setup.properties" -Value $setupContent -NoNewline
-          Write-Host "Created setup.properties:"
-          Get-Content "$lexiaDir\setup.properties"
+          
+          # APPROACH 1: Create directory junctions from assets_a/* to parent
+          # So contentURL=app:/ resolves to app:/audio_us/... instead of app:/assets_a/audio_us/...
+          Write-Host "=== Creating directory junctions ==="
+          $assetsDir = "$lexiaDir\assets_a"
+          Get-ChildItem $assetsDir -Directory | ForEach-Object {
+            $target = Join-Path $lexiaDir $_.Name
+            if (-not (Test-Path $target)) {
+              cmd /c mklink /J "$target" "$($_.FullName)" 2>&1
+              Write-Host "  Created junction: $target -> $($_.FullName)"
+            } else {
+              Write-Host "  Already exists: $target"
+            }
+          }
+          
+          # APPROACH 2: Also keep setup.properties (belt and suspenders)
+          $setupContent = "contentURL=app:/assets_a/"
+          Set-Content -Path "$lexiaDir\setup.properties" -Value $setupContent -NoNewline -Encoding UTF8
+          Write-Host "Created setup.properties: $setupContent"
+          
+          # APPROACH 3: Also try app-storage:/assets_a/ variant
+          $setupContent2 = "contentURL=app-storage:/assets_a/"
+          
+          # Dump AssetManifest.as to understand getAssetURL()
+          Write-Host "========== FULL AssetManifest.as =========="
+          $assetManifest = Get-ChildItem "C:\swf_decompiled" -Recurse -Filter "AssetManifest.as" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($assetManifest) { Get-Content $assetManifest.FullName | ForEach-Object { Write-Host $_ } }
+          
+          # Dump full PortalDesktop.as (all lines, to see preinitialize handler)
+          Write-Host "========== FULL PortalDesktop.as (lines 240-300) =========="
+          $portalDesktop = Get-ChildItem "C:\swf_decompiled" -Recurse -Filter "PortalDesktop.as" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($portalDesktop) { Get-Content $portalDesktop.FullName | Select-Object -Skip 240 -First 60 | ForEach-Object { Write-Host $_ } }
+          
+          # Check what dirs exist in assets_a
+          Write-Host "=== assets_a subdirectories ==="
+          Get-ChildItem $assetsDir -Directory | Select-Object Name | ForEach-Object { Write-Host "  $($_.Name)" }
+          
+          # Verify audio file exists
+          $audioFile = "$assetsDir\audio_us\a01_bascateg\words_can_grouped_together_they.mp3"
+          Write-Host "=== Audio file check: $audioFile ==="
+          if (Test-Path $audioFile) { 
+            Write-Host "  EXISTS ($((Get-Item $audioFile).Length) bytes)"
+          } else {
+            Write-Host "  NOT FOUND"
+            # Search for the file
+            Get-ChildItem $assetsDir -Recurse -Filter "words_can_grouped_together_they.mp3" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  Found at: $($_.FullName)" }
+          }
           
       - name: Setup hosts redirect and proxy
         shell: pwsh
