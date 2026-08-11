@@ -18,8 +18,22 @@ jobs:
           path: lexia-installer.exe
           key: lexia-installer-v1.0
 
+      - name: Cache Lexia installation
+        id: cache-install-dir
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files (x86)\Lexia Core5
+          key: lexia-app-installed-v1.0
+
+      - name: Cache AMFPHP
+        id: cache-amfphp
+        uses: actions/cache@v4
+        with:
+          path: C:\amfphp
+          key: amfphp-v2.0
+
       - name: Download Lexia Core5 installer from release
-        if: steps.cache-installer.outputs.cache-hit != 'true'
+        if: steps.cache-installer.outputs.cache-hit != 'true' && steps.cache-install-dir.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $apiUrl = "https://api.github.com/repos/aciderix/lexia-core5-portable/releases/assets/508863891"
@@ -29,7 +43,14 @@ jobs:
       - name: Check if already installed
         id: check-install
         shell: pwsh
-        run: if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") { echo "installed=true" >> $env:GITHUB_OUTPUT } else { echo "installed=false" >> $env:GITHUB_OUTPUT }
+        run: |
+          if (Test-Path "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe") {
+            Write-Host "Lexia Core5 is installed."
+            echo "installed=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "Lexia Core5 is NOT installed."
+            echo "installed=false" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Install Lexia Core5 silently
         if: steps.check-install.outputs.installed != 'true'
@@ -37,7 +58,7 @@ jobs:
         run: |
           $proc = Start-Process -FilePath ".\lexia-installer.exe" -ArgumentList "--mode","unattended","--unattendedmodeui","none" -Wait -PassThru
           Write-Host "Installer exit code: $($proc.ExitCode)"
-          Start-Sleep -Seconds 15
+          Start-Sleep -Seconds 10
 
       - name: Setup PHP and AMFPHP
         shell: pwsh
@@ -45,8 +66,6 @@ jobs:
           $php = Get-Command php -ErrorAction SilentlyContinue
           if ($php) {
             Write-Host "PHP already available: $($php.Source)"
-            $phpVersion = & php -v 2>&1 | Select-Object -First 1
-            Write-Host "PHP version: $phpVersion"
           } else {
             Write-Host "Installing PHP via chocolatey..."
             choco install php --no-progress -y
@@ -54,51 +73,46 @@ jobs:
             if (-not $php) { Write-Host "ERROR: PHP installation failed!"; exit 1 }
           }
           
-          Write-Host "Downloading AMFPHP 2.x..."
-          Invoke-WebRequest -Uri "https://github.com/silexlabs/amfphp-2.0/archive/refs/heads/master.zip" -OutFile "amfphp.zip"
-          Expand-Archive -Path "amfphp.zip" -DestinationPath "C:\amfphp-src" -Force
+          if (-not (Test-Path "C:\amfphp\Amfphp\index.php")) {
+            Write-Host "Downloading AMFPHP 2.x..."
+            Invoke-WebRequest -Uri "https://github.com/silexlabs/amfphp-2.0/archive/refs/heads/master.zip" -OutFile "amfphp.zip"
+            Expand-Archive -Path "amfphp.zip" -DestinationPath "C:\amfphp-src" -Force
+            
+            $amfphpDir = Get-ChildItem -Path "C:\amfphp-src" -Directory | Select-Object -First 1
+            New-Item -ItemType Directory -Force -Path "C:\amfphp" | Out-Null
+            Copy-Item -Path "$($amfphpDir.FullName)\*" -Destination "C:\amfphp" -Recurse -Force
+            
+            Write-Host "=== Patching AMFPHP for PHP 8.x compat ==="
+            $errorHandlerFile = "C:\amfphp\Amfphp\Plugins\AmfphpErrorHandler\AmfphpErrorHandler.php"
+            if (Test-Path $errorHandlerFile) {
+              $ehContent = Get-Content $errorHandlerFile -Raw
+              $ehContent = $ehContent -replace 'function custom_warning_handler\((\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+)\)', 'function custom_warning_handler($1, $2, $3, $4, $5 = null)'
+              Set-Content $errorHandlerFile -Value $ehContent -NoNewline
+              Write-Host "  Patched AmfphpErrorHandler: 5th param now optional"
+            }
+            
+            Get-ChildItem -Path "C:\amfphp\Amfphp" -Filter "*.php" -Recurse | ForEach-Object {
+              $fcontent = Get-Content $_.FullName -Raw
+              $modified = $false
+              if ($fcontent -match '\beach\s*\(') {
+                $fcontent = $fcontent -replace 'while\(\s*each\(\$(\w+)\)\s*\)\s*{', 'foreach ($$$1 as $__key => $__val) {'
+                $modified = $true
+              }
+              if ($fcontent -match 'get_magic_quotes_gpc\s*\(') {
+                $fcontent = $fcontent -replace 'get_magic_quotes_gpc\(\)', 'false'
+                $modified = $true
+              }
+              if ($fcontent -match 'get_magic_quotes_runtime\s*\(') {
+                $fcontent = $fcontent -replace 'get_magic_quotes_runtime\(\)', 'false'
+                $modified = $true
+              }
+              if ($modified) { Set-Content $_.FullName -Value $fcontent -NoNewline }
+            }
+          }
           
-          $amfphpDir = Get-ChildItem -Path "C:\amfphp-src" -Directory | Select-Object -First 1
-          New-Item -ItemType Directory -Force -Path "C:\amfphp" | Out-Null
-          Copy-Item -Path "$($amfphpDir.FullName)\*" -Destination "C:\amfphp" -Recurse -Force
-          
+          # Always sync latest AMFClient.php
           Copy-Item "scripts/AMFClient.php" -Destination "C:\amfphp\Amfphp\Services\AMFClient.php" -Force
-          Write-Host "AMFClient.php copied"
-          
-          $indexFile = "C:\amfphp\Amfphp\index.php"
-          if (Test-Path $indexFile) {
-            Write-Host "Gateway found at: $indexFile"
-          } else {
-            Write-Host "ERROR: No index.php found!"
-            exit 1
-          }
-          
-          Write-Host "=== Patching AMFPHP for PHP 8.x compat ==="
-          $errorHandlerFile = "C:\amfphp\Amfphp\Plugins\AmfphpErrorHandler\AmfphpErrorHandler.php"
-          if (Test-Path $errorHandlerFile) {
-            $ehContent = Get-Content $errorHandlerFile -Raw
-            $ehContent = $ehContent -replace 'function custom_warning_handler\((\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+)\)', 'function custom_warning_handler($1, $2, $3, $4, $5 = null)'
-            Set-Content $errorHandlerFile -Value $ehContent -NoNewline
-            Write-Host "  Patched AmfphpErrorHandler: 5th param now optional"
-          }
-          
-          Get-ChildItem -Path "C:\amfphp\Amfphp" -Filter "*.php" -Recurse | ForEach-Object {
-            $fcontent = Get-Content $_.FullName -Raw
-            $modified = $false
-            if ($fcontent -match '\beach\s*\(') {
-              $fcontent = $fcontent -replace 'while\(\s*each\(\$(\w+)\)\s*\)\s*{', 'foreach ($$$1 as $__key => $__val) {'
-              $modified = $true
-            }
-            if ($fcontent -match 'get_magic_quotes_gpc\s*\(') {
-              $fcontent = $fcontent -replace 'get_magic_quotes_gpc\(\)', 'false'
-              $modified = $true
-            }
-            if ($fcontent -match 'get_magic_quotes_runtime\s*\(') {
-              $fcontent = $fcontent -replace 'get_magic_quotes_runtime\(\)', 'false'
-              $modified = $true
-            }
-            if ($modified) { Set-Content $_.FullName -Value $fcontent -NoNewline }
-          }
+          Write-Host "AMFClient.php updated"
 
       - name: Setup content and copy assets
         shell: pwsh
@@ -106,11 +120,7 @@ jobs:
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
           $appDataDir = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
           
-          Write-Host "=== AppData dir: $appDataDir ==="
-          if (Test-Path $appDataDir) {
-            Get-ChildItem $appDataDir -Recurse -ErrorAction SilentlyContinue | Select-Object FullName -First 20 | Format-Table -AutoSize
-          } else {
-            Write-Host "AppData dir not found, creating..."
+          if (-not (Test-Path $appDataDir)) {
             New-Item -ItemType Directory -Force -Path $appDataDir | Out-Null
           }
           
@@ -119,13 +129,10 @@ jobs:
           if (-not (Test-Path $destAssets)) {
             Write-Host "=== Copying assets_a to AppData ==="
             Copy-Item "$lexiaDir\assets_a" $destAssets -Recurse -Force
-            Write-Host "Copied assets_a ($((Get-ChildItem $destAssets -Recurse -File).Count) files)"
-          } else {
-            Write-Host "assets_a already exists in AppData"
+            Write-Host "Copied assets_a"
           }
           
-          # Create FlashPlayerTrust entry for the app installation directory
-          Write-Host "=== Setting up FlashPlayerTrust ==="
+          # Create FlashPlayerTrust entry
           $trustDir = "$env:APPDATA\Macromedia\Flash Player\#Security\FlashPlayerTrust"
           $trustFile = "$trustDir\lexia.cfg"
           if (-not (Test-Path $trustDir)) {
@@ -133,131 +140,22 @@ jobs:
           }
           Set-Content -Path $trustFile -Value "C:\Program Files (x86)\Lexia Core5`nC:\Users\runneradmin\AppData\Roaming\com.lexiareading.core5.desktop.us" -Force
           Write-Host "Created trust file: $trustFile"
-          
-          # Also read XML config for debugging
-          Write-Host "=== XML config for bascateg ==="
-          $xmlFile = "$lexiaDir\assets_a\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
-          if (Test-Path $xmlFile) {
-            Get-Content $xmlFile | Select-Object -First 80
-          }
 
-      - name: Decompile SWF and dump key files
-        shell: pwsh
-        run: |
-          $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
-          $swf = "$lexiaDir\PortalDesktop.swf"
-          
-          # Download JPEXS Flash Decompiler
-          $ffdecUrl = "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version26.2.1/ffdec_26.2.1.zip"
-          Write-Host "Downloading JPEXS Flash Decompiler..."
-          Invoke-WebRequest -Uri $ffdecUrl -OutFile "C:\ffdec.zip" -MaximumRedirection 5
-          Expand-Archive -Path "C:\ffdec.zip" -DestinationPath "C:\ffdec" -Force
-          $ffdecJar = Get-ChildItem "C:\ffdec" -Filter "ffdec.jar" -Recurse | Select-Object -First 1
-          
-          # Check if Java is available
-          $java = Get-Command java -ErrorAction SilentlyContinue
-          if (-not $java) {
-            choco install openjdk17 -y --no-progress 2>$null
-            $env:JAVA_HOME = "C:\Program Files\OpenJDK\openjdk-17"
-            $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-          }
-          
-          # Decompile the SWF
-          Write-Host "Decompiling SWF..."
-          $exportDir = "C:\swf_decompiled"
-          New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
-          & java -jar $ffdecJar.FullName -export script $exportDir $swf 2>&1 | Out-Null
-          
-          # Dump full SoundTask.as
-          Write-Host "========== FULL SoundTask.as =========="
-          $soundTask = Get-ChildItem $exportDir -Recurse -Filter "SoundTask.as" | Select-Object -First 1
-          if ($soundTask) { Get-Content $soundTask.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full URLHelper.as
-          Write-Host "========== FULL URLHelper.as =========="
-          $urlHelper = Get-ChildItem $exportDir -Recurse -Filter "URLHelper.as" | Select-Object -First 1
-          if ($urlHelper) { Get-Content $urlHelper.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full MediaManager.as
-          Write-Host "========== FULL MediaManager.as =========="
-          $mediaMgr = Get-ChildItem $exportDir -Recurse -Filter "MediaManager.as" | Select-Object -First 1
-          if ($mediaMgr) { Get-Content $mediaMgr.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full PortalDesktop.as (first 250 lines)
-          Write-Host "========== PortalDesktop.as (first 250 lines) =========="
-          $portalDesktop = Get-ChildItem $exportDir -Recurse -Filter "PortalDesktop.as" | Select-Object -First 1
-          if ($portalDesktop) { Get-Content $portalDesktop.FullName | Select-Object -First 250 | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full SoundTaskModel.as
-          Write-Host "========== FULL SoundTaskModel.as =========="
-          $soundTaskModel = Get-ChildItem $exportDir -Recurse -Filter "SoundTaskModel.as" | Select-Object -First 1
-          if ($soundTaskModel) { Get-Content $soundTaskModel.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full MediaModel.as
-          Write-Host "========== FULL MediaModel.as =========="
-          $mediaModel = Get-ChildItem $exportDir -Recurse -Filter "MediaModel.as" | Select-Object -First 1
-          if ($mediaModel) { Get-Content $mediaModel.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full MediaCollection.as
-          Write-Host "========== FULL MediaCollection.as =========="
-          $mediaColl = Get-ChildItem $exportDir -Recurse -Filter "MediaCollection.as" | Select-Object -First 1
-          if ($mediaColl) { Get-Content $mediaColl.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full exercise XML
-          Write-Host "========== FULL Exercise XML =========="
-          $xmlFile = "$lexiaDir\assets_a\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
-          if (Test-Path $xmlFile) { Get-Content $xmlFile | ForEach-Object { Write-Host $_ } }
-          
-          # Check for setup/properties files
-          Write-Host "========== Setup/Properties files =========="
-          Get-ChildItem $lexiaDir -Filter "*.properties" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { 
-            Write-Host "--- $($_.FullName) ---"
-            Get-Content $_.FullName | ForEach-Object { Write-Host $_ }
-          }
-          Get-ChildItem $lexiaDir -Filter "setup*" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { 
-            Write-Host "--- $($_.FullName) ---"
-            Get-Content $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-          }
-          
-          # Check AIR application descriptor
-          Write-Host "========== AIR app descriptor =========="
-          $airXml = Get-ChildItem $lexiaDir -Filter "application.xml" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($airXml) { Get-Content $airXml.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Check how app is launched
-          Write-Host "========== App exe and config =========="
-          Get-ChildItem $lexiaDir -Filter "*.exe" | ForEach-Object { Write-Host "EXE: $($_.Name) ($($_.Length) bytes)" }
-          Get-ChildItem $lexiaDir -Filter "*.xml" | Select-Object Name, Length | Format-Table
-          
-          # Check AppData for any setup files
-          $appData = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
-          Write-Host "========== AppData setup files =========="
-          Get-ChildItem $appData -Filter "*.properties" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "--- $($_.FullName) ---"
-            Get-Content $_.FullName | ForEach-Object { Write-Host $_ }
-          }
-          
       - name: Fix content paths and exercise XML
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
           $assetsDir = "$lexiaDir\assets_a"
           
-          # APPROACH 1: Create directory junctions from assets_a/* to parent
-          Write-Host "=== Creating directory junctions ==="
+          # Directory junctions from assets_a/* to parent
           Get-ChildItem $assetsDir -Directory | ForEach-Object {
             $target = Join-Path $lexiaDir $_.Name
             if (-not (Test-Path $target)) {
               cmd /c mklink /J "$target" "$($_.FullName)" 2>&1 | Out-Null
-              Write-Host "  Created junction: $target"
             }
           }
           
-          # APPROACH 2: Fix exercise XML - change dir="../../" to HTTPS URL
-          # OSMF needs HTTPStatusEvent (code 200) to confirm file loading
-          # app:/ and file:/// don't trigger this event -> Error #2032
-          # Using HTTPS makes OSMF send GET requests through the proxy, which
-          # serves local files with proper HTTP 200 status
+          # Fix exercise XML dir attribute for all files
           Write-Host "=== Fixing exercise XML dir attribute (all XML files) ==="
           $dirValue = "https://student.mylexia.com/assets_a/"
           $xmlFiles = Get-ChildItem -Path "$assetsDir\xml_us" -Recurse -Filter "*.xml" -ErrorAction SilentlyContinue
@@ -271,32 +169,7 @@ jobs:
             }
           }
           Write-Host "  Fixed dir attribute in $fixedCount / $($xmlFiles.Count) XML files"
-          
-          # APPROACH 3: Fix PHP 8 each() compatibility
-          # The regex needs to match while(list($k, $v) = each($arr))
-          Write-Host "=== Fixing PHP 8 each() compatibility ==="
-          $phpFiles = Get-ChildItem "C:\amfphp" -Recurse -Filter "*.php" -ErrorAction SilentlyContinue
-          $fixCount = 0
-          foreach ($f in $phpFiles) {
-            $c = Get-Content $f.FullName -Raw
-            if ($c -match 'while\s*\(\s*list\s*\(\s*\$(\w+)\s*,\s*\$(\w+)\s*\)\s*=\s*each\s*\(\s*\$(\w+)\s*\)') {
-              $c = $c -replace 'while\s*\(\s*list\s*\(\s*\$(\w+)\s*,\s*\$(\w+)\s*\)\s*=\s*each\s*\(\s*\$(\w+)\s*\)\s*\)', 'foreach ($$$3 as $$$1 => $$$2)'
-              Set-Content -Path $f.FullName -Value $c -NoNewline -Encoding UTF8
-              $fixCount++
-              Write-Host "  Fixed: $($f.Name)"
-            }
-          }
-          Write-Host "  Fixed $fixCount PHP files with each()"
-          
-          # Verify audio file exists at expected path
-          $audioFile = "$assetsDir\audio_us\a01_bascateg\words_can_grouped_together_they.mp3"
-          Write-Host "=== Audio file check ==="
-          if (Test-Path $audioFile) { 
-            Write-Host "  EXISTS ($((Get-Item $audioFile).Length) bytes)"
-          } else {
-            Write-Host "  NOT FOUND!"
-          }
-          
+
       - name: Setup hosts redirect and proxy
         shell: pwsh
         run: |
@@ -338,33 +211,26 @@ jobs:
           }
           "@
 
-          # ============================================================
           # STEP 1: Start PHP server + HTTPS proxy
-          # ============================================================
           Write-Host "Starting PHP server on port 8080..."
           $phpJob = Start-Job -ScriptBlock {
             php -S 127.0.0.1:8080 -t C:\amfphp 2>&1 | Out-File C:\php-stdout.txt -Encoding UTF8
           }
-          Start-Sleep -Seconds 3
+          Start-Sleep -Seconds 2
           
           Write-Host "Starting HTTPS proxy on port 443..."
           $proxyJob = Start-Job -ScriptBlock { python C:\proxy.py 2>&1 | Out-File C:\proxy-stdout.txt -Encoding UTF8 }
-          Start-Sleep -Seconds 5
-          netstat -an | Select-String ":443 ",":8080 "
+          Start-Sleep -Seconds 3
 
-          # ============================================================
           # STEP 2: First app launch (creates #SharedObjects directory)
-          # ============================================================
           Write-Host "=== First app launch (creates SharedObject dirs) ==="
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc1 = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 15
+          Start-Sleep -Seconds 8
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep -Seconds 3
+          Start-Sleep -Seconds 2
 
-          # ============================================================
           # STEP 3: Place AMF0 .sol file with siteId=1
-          # ============================================================
           Write-Host "=== Placing AMF0 .sol file ==="
           $soDirs = Get-ChildItem -Path "$env:APPDATA" -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
           foreach ($soDir in $soDirs) {
@@ -380,19 +246,17 @@ jobs:
             }
           }
 
-          # ============================================================
           # STEP 4: Second app launch
-          # ============================================================
           Write-Host "=== Second app launch ==="
           $proc = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 25
+          Start-Sleep -Seconds 15
           
           $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
           if ($p -and $p.MainWindowHandle -ne 0) {
             $sw::ShowWindow($p.MainWindowHandle, 3) | Out-Null
             Start-Sleep -Milliseconds 500
             $fg::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 2
           } else { Write-Host "Process not found!"; exit 1 }
 
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
@@ -420,7 +284,7 @@ jobs:
             $absY = $winTop + $relY
             Write-Host "  Click: ($absX,$absY) = rel($relX,$relY) - $label"
             [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($absX, $absY)
-            Start-Sleep -Milliseconds 500
+            Start-Sleep -Milliseconds 300
             $me::mouse_event(0x02, 0, 0, 0, 0)
             Start-Sleep -Milliseconds 100
             $me::mouse_event(0x04, 0, 0, 0, 0)
@@ -431,120 +295,80 @@ jobs:
             $ke::keybd_event($vk, 0, 0, [UIntPtr]::Zero)
             Start-Sleep -Milliseconds 50
             $ke::keybd_event($vk, 0, 2, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 150
           }
 
           function TypeText($text) {
             [System.Windows.Forms.SendKeys]::SendWait($text)
-            Start-Sleep -Milliseconds 500
+            Start-Sleep -Milliseconds 300
           }
 
           TakeScreenshot "01-initial.png"
 
-          # ============================================================
           # STEP 5: Student/Parent -> email -> congrats -> login
-          # ============================================================
           Write-Host "=== Tab+Space to activate Student/Parent ==="
           $fg::SetForegroundWindow($p2.MainWindowHandle) | Out-Null
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
           PressKey 9   # TAB
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
           PressKey 32  # SPACE
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 3
 
           Write-Host "=== Entering teacher email ==="
           ClickAt 529 364 "Email field"
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
           TypeText "teacher@school.edu"
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
           TakeScreenshot "02-email-typed.png"
 
           Write-Host "=== Submitting email (hardware ENTER) ==="
           PressKey 13  # ENTER
-          Start-Sleep -Seconds 6
+          Start-Sleep -Seconds 4
           TakeScreenshot "03-after-email-enter.png"
 
           Write-Host "=== Advancing past Congratulations screen ==="
           PressKey 13  # ENTER
-          Start-Sleep -Seconds 6
+          Start-Sleep -Seconds 4
           TakeScreenshot "04-login-screen.png"
 
-          # ============================================================
           # STEP 6: Enter student credentials
-          # ============================================================
           Write-Host "=== Entering student credentials ==="
           ClickAt 530 382 "Username field"
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
           TypeText "student"
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
 
           ClickAt 530 427 "Password field"
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
           TypeText "password"
-          Start-Sleep -Milliseconds 500
+          Start-Sleep -Milliseconds 300
           TakeScreenshot "05-credentials-entered.png"
 
           Write-Host "=== Clicking login button ==="
           ClickAt 512 502 "Arrow submit button"
-          Start-Sleep -Seconds 8
+          Start-Sleep -Seconds 5
           TakeScreenshot "06-after-login.png"
 
-          # The app shows "Is your name Admin Portable?" confirmation
-          # screen after first login. Press ENTER to confirm and trigger
-          # the second login call (authenticateOnly: false).
           Write-Host "=== Confirming name (Is your name Admin Portable?) ==="
           PressKey 13  # ENTER
-          Start-Sleep -Seconds 8
+          Start-Sleep -Seconds 5
           TakeScreenshot "06b-after-name-confirm.png"
 
-          # Wait for app to load (login + level selection screen)
           Write-Host "=== Waiting for level selection screen ==="
-          for ($i = 7; $i -le 12; $i++) {
-            Start-Sleep -Seconds 5
-            TakeScreenshot ("{0:D2}-loading.png" -f $i)
-          }
+          Start-Sleep -Seconds 5
+          TakeScreenshot "07-level-screen-ready.png"
 
-          # ============================================================
-          # STEP 7: Click on activity thumbnail (exact coords confirmed
-          # from user screenshot: white thumbnail boxes inside the yellow
-          # card, NOT the icons above them). All at y~=282-283:
-          #   Rhyming: (299,282)  Letter Matching: (441,282)
-          #   Categorizing Pictures: (582,283)  Nursery Rhymes: (725,282)
-          # ============================================================
+          # STEP 7: Click activity thumbnail
           Write-Host "=== Clicking activity thumbnail ==="
-          TakeScreenshot "13-level-screen.png"
+          TakeScreenshot "08-before-click.png"
 
           ClickAt 582 283 "Categorizing Pictures thumbnail"
           Start-Sleep -Seconds 5
-          TakeScreenshot "14-after-categorizing-click.png"
+          TakeScreenshot "09-after-categorizing-click.png"
 
-          # Backup attempts on the other thumbnails in case the first
-          # one is locked or the click missed
-          ClickAt 299 282 "Rhyming thumbnail"
-          Start-Sleep -Seconds 5
-          TakeScreenshot "15-after-rhyming-click.png"
-
-          ClickAt 441 282 "Letter Matching thumbnail"
-          Start-Sleep -Seconds 5
-          TakeScreenshot "16-after-lettermatching-click.png"
-
-          ClickAt 725 282 "Nursery Rhymes thumbnail"
-          Start-Sleep -Seconds 5
-          TakeScreenshot "17-after-nurseryrhymes-click.png"
-
-          # Wait and capture progress
-          for ($i = 18; $i -le 26; $i++) {
-            Start-Sleep -Seconds 5
-            TakeScreenshot ("{0:D2}-progress.png" -f $i)
-          }
-
-          # ============================================================
           # STEP 8: Collect logs
-          # ============================================================
           Write-Host "=== AMF Log ==="
           if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt }
-          Write-Host "=== Processes ==="
-          Get-Process -Name "python","php","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
           Write-Host "=== PortalDesktop.log ==="
           $found = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
