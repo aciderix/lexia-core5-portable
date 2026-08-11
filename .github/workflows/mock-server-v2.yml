@@ -185,9 +185,9 @@ jobs:
                 if ($lines[$i] -match 'CONTENT_URL|contentUrl|contentURL') {
                   $start = [Math]::Max(0, $i - 5)
                   $end = [Math]::Min($lines.Count - 1, $i + 10)
-                  Write-Host "  Lines $start-$end:"
+                  Write-Host "  Lines ${start}-${end}:"
                   for ($j = $start; $j -le $end; $j++) {
-                    Write-Host "    $j: $($lines[$j])"
+                    Write-Host "    ${j}: $($lines[$j])"
                   }
                 }
               }
@@ -204,7 +204,7 @@ jobs:
                 if ($lines[$i] -match 'SoundTask') {
                   $start = [Math]::Max(0, $i - 3)
                   $end = [Math]::Min($lines.Count - 1, $i + 15)
-                  Write-Host "  Lines $start-$end:"
+                  Write-Host "  Lines ${start}-${end}:"
                   for ($j = $start; $j -le $end; $j++) {
                     Write-Host "    $($lines[$j])"
                   }
