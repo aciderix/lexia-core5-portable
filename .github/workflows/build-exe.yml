@@ -1,0 +1,38 @@
+name: Build Standalone Executable
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller cryptography
+
+      - name: Build Standalone Executable with PyInstaller
+        run: |
+          pyinstaller --onefile --uac-admin --name LexiaPortableServer scripts/LexiaServerLauncher.py
+
+      - name: Test Executable Help / Dry Run
+        run: |
+          Get-Item dist\LexiaPortableServer.exe
+
+      - name: Upload Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LexiaPortableServer-exe
+          path: dist/LexiaPortableServer.exe
+          retention-days: 90

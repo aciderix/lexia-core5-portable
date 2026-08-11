@@ -211,7 +211,19 @@ jobs:
           }
           "@
 
-          # STEP 1: Start PHP server + HTTPS proxy
+          # STEP 1: Start Video & Audio Recording with FFmpeg
+          Write-Host "Starting video & audio recording..."
+          $ffmpegJob = Start-Job -ScriptBlock {
+            # Try recording video + audio (WASAPI loopback) first
+            ffmpeg -y -f gdigrab -framerate 15 -i desktop -f wasapi -i default -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac C:\gameplay.mp4 2>&1 | Out-File C:\ffmpeg-stdout.txt -Encoding UTF8
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path C:\gameplay.mp4)) {
+              # Fallback to video-only if audio device is unavailable (e.g. headless CI)
+              ffmpeg -y -f gdigrab -framerate 15 -i desktop -c:v libx264 -preset ultrafast -pix_fmt yuv420p C:\gameplay.mp4 2>&1 | Out-File C:\ffmpeg-stdout.txt -Encoding UTF8
+            }
+          }
+          Start-Sleep -Seconds 2
+
+          # STEP 2: Start PHP server + HTTPS proxy
           Write-Host "Starting PHP server on port 8080..."
           $phpJob = Start-Job -ScriptBlock {
             php -S 127.0.0.1:8080 -t C:\amfphp 2>&1 | Out-File C:\php-stdout.txt -Encoding UTF8
@@ -222,7 +234,7 @@ jobs:
           $proxyJob = Start-Job -ScriptBlock { python C:\proxy.py 2>&1 | Out-File C:\proxy-stdout.txt -Encoding UTF8 }
           Start-Sleep -Seconds 3
 
-          # STEP 2: First app launch (creates #SharedObjects directory)
+          # STEP 3: First app launch (creates #SharedObjects directory)
           Write-Host "=== First app launch (creates SharedObject dirs) ==="
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc1 = Start-Process -FilePath $exe -PassThru
@@ -230,7 +242,7 @@ jobs:
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep -Seconds 2
 
-          # STEP 3: Place AMF0 .sol file with siteId=1
+          # STEP 4: Place AMF0 .sol file with siteId=1
           Write-Host "=== Placing AMF0 .sol file ==="
           $soDirs = Get-ChildItem -Path "$env:APPDATA" -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
           foreach ($soDir in $soDirs) {
@@ -246,7 +258,7 @@ jobs:
             }
           }
 
-          # STEP 4: Second app launch
+          # STEP 5: Second app launch
           Write-Host "=== Second app launch ==="
           $proc = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 15
@@ -305,7 +317,7 @@ jobs:
 
           TakeScreenshot "01-initial.png"
 
-          # STEP 5: Student/Parent -> email -> congrats -> login
+          # STEP 6: Student/Parent -> email -> congrats -> login
           Write-Host "=== Tab+Space to activate Student/Parent ==="
           $fg::SetForegroundWindow($p2.MainWindowHandle) | Out-Null
           Start-Sleep -Milliseconds 300
@@ -331,7 +343,7 @@ jobs:
           Start-Sleep -Seconds 4
           TakeScreenshot "04-login-screen.png"
 
-          # STEP 6: Enter student credentials
+          # STEP 7: Enter student credentials
           Write-Host "=== Entering student credentials ==="
           ClickAt 530 382 "Username field"
           Start-Sleep -Milliseconds 300
@@ -358,7 +370,7 @@ jobs:
           Start-Sleep -Seconds 5
           TakeScreenshot "07-level-screen-ready.png"
 
-          # STEP 7: Click activity thumbnail
+          # STEP 8: Click activity thumbnail
           Write-Host "=== Clicking activity thumbnail ==="
           TakeScreenshot "08-before-click.png"
 
@@ -366,7 +378,18 @@ jobs:
           Start-Sleep -Seconds 5
           TakeScreenshot "09-after-categorizing-click.png"
 
-          # STEP 8: Collect logs
+          # STEP 9: Click Next Arrow (bottom right corner: relX=853, relY=661)
+          Write-Host "=== Clicking Next Arrow (bottom right) ==="
+          ClickAt 853 661 "Next Arrow button"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "10-after-next-arrow-click.png"
+
+          Write-Host "=== Clicking Next Arrow second time ==="
+          ClickAt 853 661 "Next Arrow button 2"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "11-after-second-next.png"
+
+          # STEP 10: Collect logs & cleanup
           Write-Host "=== AMF Log ==="
           if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt }
 
@@ -382,8 +405,10 @@ jobs:
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
           Stop-Job $phpJob -ErrorAction SilentlyContinue
           Stop-Job $proxyJob -ErrorAction SilentlyContinue
+          Stop-Job $ffmpegJob -ErrorAction SilentlyContinue
           Remove-Job $phpJob -ErrorAction SilentlyContinue
           Remove-Job $proxyJob -ErrorAction SilentlyContinue
+          Remove-Job $ffmpegJob -ErrorAction SilentlyContinue
           '
           
           $code | Out-File -FilePath "C:\interact.ps1" -Encoding UTF8
@@ -398,6 +423,7 @@ jobs:
             C:\amf-log.txt
             C:\proxy-stdout.txt
             C:\php-stdout.txt
+            C:\ffmpeg-stdout.txt
           retention-days: 30
           if-no-files-found: ignore
 
@@ -407,5 +433,14 @@ jobs:
         with:
           name: mock-test-screenshots
           path: screenshots/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload video recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-test-video
+          path: C:\gameplay.mp4
           retention-days: 30
           if-no-files-found: ignore
