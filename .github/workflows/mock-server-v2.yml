@@ -241,53 +241,67 @@ jobs:
           # Wait for app to fully load
           Start-Sleep -Seconds 5
 
-          # Add mouse_event for clicking
+          # Add mouse_event and GetWindowRect for clicking
           $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
+          Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+public class WinRect {
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+}
+"@
 
-          # Click on "If you are a student or parent click here"
-          # The app is 1024x768, student/parent link is typically in the lower-left area
-          Write-Host "=== Clicking student/parent login ==="
-          
-          # Try clicking at various positions where the student link might be
-          $clickPositions = @(
-            @{X=256; Y=550; Name="lower-left"},
-            @{X=350; Y=500; Name="mid-left"},
-            @{X=512; Y=600; Name="bottom-center"},
-            @{X=200; Y=600; Name="bottom-left"}
-          )
-          
-          foreach ($pos in $clickPositions) {
-            Write-Host "  Clicking at ($($pos.X), $($pos.Y)) - $($pos.Name)"
-            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($pos.X, $pos.Y)
+          # Get the actual window position/size (the screenshot dialog shows a 1024x768 window,
+          # but its on-screen origin may not be 0,0 - find its real client rect)
+          $p2 = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
+          $winLeft = 0; $winTop = 0
+          if ($p2 -and $p2.MainWindowHandle -ne 0) {
+            $rect = New-Object RECT
+            [WinRect]::GetWindowRect($p2.MainWindowHandle, [ref]$rect) | Out-Null
+            $winLeft = $rect.Left
+            $winTop = $rect.Top
+            Write-Host "App window rect: Left=$($rect.Left) Top=$($rect.Top) Right=$($rect.Right) Bottom=$($rect.Bottom)"
+          }
+
+          function ClickAt($relX, $relY, $label) {
+            $absX = $winLeft + $relX
+            $absY = $winTop + $relY
+            Write-Host "  Clicking at screen($absX, $absY) = window-relative($relX, $relY) - $label"
+            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($absX, $absY)
             Start-Sleep -Milliseconds 500
             $me::mouse_event(0x02, 0, 0, 0, 0)  # left button down
             Start-Sleep -Milliseconds 100
             $me::mouse_event(0x04, 0, 0, 0, 0)  # left button up
-            Start-Sleep -Seconds 3
-            TakeScreenshot "02-after-click-$($pos.Name).png"
+            Start-Sleep -Seconds 2
           }
+
+          # Click the "Student/Parent" button - coordinates from the observed dialog
+          # (dialog window content area, button center around x=666, y=381 in a 1024x768 window)
+          Write-Host "=== Clicking Student/Parent button ==="
+          ClickAt 666 381 "Student/Parent button"
+          TakeScreenshot "02-after-student-parent-click.png"
           
-          # Check what screen we are on now
           Start-Sleep -Seconds 3
           TakeScreenshot "03-login-screen.png"
           
           # Try typing credentials (student login typically asks for student ID)
           Write-Host "=== Attempting to type credentials ==="
-          
-          # Type a student ID
           [System.Windows.Forms.SendKeys]::SendWait("student")
           Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
           Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("password")
           Start-Sleep -Milliseconds 500
+          TakeScreenshot "04-before-submit.png"
           [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 10
           
-          TakeScreenshot "04-after-login.png"
+          TakeScreenshot "05-after-login.png"
           
           # Wait and take more screenshots to see if app progresses
-          for ($i = 5; $i -le 12; $i++) {
+          for ($i = 6; $i -le 13; $i++) {
             Start-Sleep -Seconds 5
             TakeScreenshot "{0:D2}-progress.png" -f $i
           }
