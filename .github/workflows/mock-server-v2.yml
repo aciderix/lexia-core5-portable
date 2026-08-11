@@ -236,6 +236,18 @@ jobs:
             Get-Content $_.FullName | ForEach-Object { Write-Host $_ }
           }
           
+      - name: Create setup.properties with correct contentURL
+        shell: pwsh
+        run: |
+          $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
+          # The app reads setup.properties from File.applicationDirectory
+          # contentURL defaults to URLHelper.getParent(url) = app:/ (parent of SWF)
+          # But content is in app:/assets_a/ so we override it
+          $setupContent = "contentURL=app:/assets_a/`n"
+          Set-Content -Path "$lexiaDir\setup.properties" -Value $setupContent -NoNewline
+          Write-Host "Created setup.properties:"
+          Get-Content "$lexiaDir\setup.properties"
+          
       - name: Setup hosts redirect and proxy
         shell: pwsh
         run: |
