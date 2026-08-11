@@ -99,79 +99,45 @@ jobs:
             if ($modified) { Set-Content $_.FullName -Value $fcontent -NoNewline }
           }
 
-      - name: Inspect installed content and copy assets
+      - name: Setup content and copy assets
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
+          $appDataDir = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
           
-          # Read the XML config to understand audio path format
+          Write-Host "=== AppData dir: $appDataDir ==="
+          if (Test-Path $appDataDir) {
+            Get-ChildItem $appDataDir -Recurse -ErrorAction SilentlyContinue | Select-Object FullName -First 20 | Format-Table -AutoSize
+          } else {
+            Write-Host "AppData dir not found, creating..."
+            New-Item -ItemType Directory -Force -Path $appDataDir | Out-Null
+          }
+          
+          # Copy assets_a to AppData Local Store (where AIR app looks for content)
+          $destAssets = "$appDataDir\assets_a"
+          if (-not (Test-Path $destAssets)) {
+            Write-Host "=== Copying assets_a to AppData ==="
+            Copy-Item "$lexiaDir\assets_a" $destAssets -Recurse -Force
+            Write-Host "Copied assets_a ($((Get-ChildItem $destAssets -Recurse -File).Count) files)"
+          } else {
+            Write-Host "assets_a already exists in AppData"
+          }
+          
+          # Create FlashPlayerTrust entry for the app installation directory
+          Write-Host "=== Setting up FlashPlayerTrust ==="
+          $trustDir = "$env:APPDATA\Macromedia\Flash Player\#Security\FlashPlayerTrust"
+          $trustFile = "$trustDir\lexia.cfg"
+          if (-not (Test-Path $trustDir)) {
+            New-Item -ItemType Directory -Force -Path $trustDir | Out-Null
+          }
+          Set-Content -Path $trustFile -Value "C:\Program Files (x86)\Lexia Core5`nC:\Users\runneradmin\AppData\Roaming\com.lexiareading.core5.desktop.us" -Force
+          Write-Host "Created trust file: $trustFile"
+          
+          # Also read XML config for debugging
           Write-Host "=== XML config for bascateg ==="
           $xmlFile = "$lexiaDir\assets_a\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
           if (Test-Path $xmlFile) {
-            Get-Content $xmlFile | Select-Object -First 50
-          } else {
-            Write-Host "XML file not found: $xmlFile"
-          }
-          
-          # Check the MP3 file
-          Write-Host "=== Checking specific MP3 file ==="
-          $mp3File = "$lexiaDir\assets_a\audio_us\a01_bascateg\words_can_grouped_together_they.mp3"
-          if (Test-Path $mp3File) {
-            $fileInfo = Get-Item $mp3File
-            Write-Host "Found: $mp3File ($($fileInfo.Length) bytes)"
-            # Read first bytes to check if it's a valid MP3
-            $bytes = [System.IO.File]::ReadAllBytes($mp3File)[0..3]
-            Write-Host "First bytes: $($bytes -join ',')"
-          } else {
-            Write-Host "NOT FOUND: $mp3File"
-          }
-          
-          # Check AppData for Lexia content directory
-          Write-Host "=== AppData Lexia directories ==="
-          $appDataLexia = Get-ChildItem "$env:APPDATA" -Recurse -Directory -Depth 3 -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "lexia|LexiaCore5" }
-          $appDataLexia | Select-Object FullName | Format-Table -AutoSize
-          
-          # Check if there's an assets directory in AppData
-          foreach ($dir in $appDataLexia) {
-            $assetsDir = Join-Path $dir.FullName "assets_a"
-            if (Test-Path $assetsDir) {
-              Write-Host "Found assets_a in AppData: $assetsDir"
-              Get-ChildItem $assetsDir -Directory | Select-Object Name | Format-Table -AutoSize
-            }
-          }
-          
-          # Copy assets_a to ALL AppData Lexia directories (in case app looks there)
-          Write-Host "=== Copying assets to AppData ==="
-          foreach ($dir in $appDataLexia) {
-            $destAssets = Join-Path $dir.FullName "assets_a"
-            if (-not (Test-Path $destAssets)) {
-              Write-Host "Copying assets_a to: $destAssets"
-              Copy-Item "$lexiaDir\assets_a" $destAssets -Recurse -Force
-              Write-Host "Done."
-            } else {
-              Write-Host "Already exists: $destAssets"
-            }
-          }
-          
-          # Also check the SharedObject .sol files for content path
-          Write-Host "=== SharedObject files ==="
-          $solFiles = Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "lexia|LexiaCore5" }
-          $solFiles | Select-Object FullName, Length | Format-Table -AutoSize
-          
-          # Check the Flash Player trust file
-          Write-Host "=== Flash Player trust ==="
-          $trustPaths = @(
-            "$env:APPDATA\Macromedia\Flash Player\#Security\FlashPlayerTrust",
-            "$env:WINDIR\System32\Macromed\Flash\FlashPlayerTrust"
-          )
-          foreach ($tp in $trustPaths) {
-            if (Test-Path $tp) {
-              Write-Host "Found trust dir: $tp"
-              Get-ChildItem $tp | ForEach-Object {
-                Write-Host "  $($_.Name):"
-                Get-Content $_.FullName | ForEach-Object { Write-Host "    $_" }
-              }
-            }
+            Get-Content $xmlFile | Select-Object -First 80
           }
 
       - name: Setup hosts redirect and proxy
