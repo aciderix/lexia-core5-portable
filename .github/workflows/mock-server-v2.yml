@@ -43,7 +43,6 @@ jobs:
         run: |
           Copy-Item "scripts/amf_server_https.py" "C:\amf_server.py"
           
-          # Redirect ALL possible Lexia domains
           $hostsFile = "C:\Windows\System32\drivers\etc\hosts"
           $entries = @(
             "127.0.0.1 student.mylexia.com",
@@ -57,11 +56,7 @@ jobs:
           foreach ($entry in $entries) {
             Add-Content -Path $hostsFile -Value $entry
           }
-          Write-Host "Hosts file updated with all Lexia domains"
-          
-          # Check PHP availability
-          $php = Get-Command php -ErrorAction SilentlyContinue
-          Write-Host "PHP available: $($php.Source)"
+          Write-Host "Hosts file updated"
 
       - name: Run mock server and app
         shell: pwsh
@@ -71,12 +66,9 @@ jobs:
           Add-Type -AssemblyName System.Drawing
           New-Item -ItemType Directory -Force -Path "screenshots" | Out-Null
 
-          # Win32 API
           $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
           $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
-          $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
 
-          # Start mock HTTPS AMF server
           Write-Host "Starting mock HTTPS AMF server..."
           $serverJob = Start-Job -ScriptBlock { python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8 }
           Start-Sleep -Seconds 8
@@ -88,12 +80,11 @@ jobs:
           Write-Host "=== netstat 443 ==="
           netstat -an | Select-String ":443 "
 
-          # Launch app
           Write-Host "Launching LexiaCore5..."
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "App PID: $($proc.Id)"
-          Start-Sleep -Seconds 15
+          Start-Sleep -Seconds 20
 
           $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
           if ($p) {
@@ -109,7 +100,6 @@ jobs:
             Write-Host "Process not found!"
           }
 
-          # Screenshot 1
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
           $bounds = $screen.Bounds
           $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
@@ -118,39 +108,12 @@ jobs:
           $bmp.Save("screenshots\01-initial.png")
           $g.Dispose(); $bmp.Dispose()
 
-          # Wait and check for more requests
           for ($i = 2; $i -le 10; $i++) {
             Start-Sleep -Seconds 5
             $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
             $bmp.Save("screenshots\{0:D2}-delayed.png" -f $i)
-            $g.Dispose(); $bmp.Dispose()
-          }
-
-          # Try clicking and typing
-          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(512, 384)
-          Start-Sleep -Milliseconds 300
-          $me::mouse_event(0x02, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 100
-          $me::mouse_event(0x04, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("12345{TAB}password{ENTER}")
-          Start-Sleep -Seconds 10
-          
-          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\11-after-input.png")
-          $g.Dispose(); $bmp.Dispose()
-
-          # Final screenshots
-          for ($i = 12; $i -le 15; $i++) {
-            Start-Sleep -Seconds 5
-            $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-            $bmp.Save("screenshots\{0:D2}-final.png" -f $i)
             $g.Dispose(); $bmp.Dispose()
           }
 
@@ -163,6 +126,45 @@ jobs:
           netstat -an | Select-String ":443 "
           Write-Host "=== Processes ==="
           Get-Process -Name "python","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
+
+          # Find and copy PortalDesktop.log (AIR app log)
+          Write-Host "=== Searching for PortalDesktop.log ==="
+          $logPaths = @(
+            "$env:APPDATA\LexiaCore5\PortalDesktop.log",
+            "$env:LOCALAPPDATA\LexiaCore5\PortalDesktop.log",
+            "$env:APPDATA\LexiaCore5\Adobe\AIR\ELS\PortalDesktop.log"
+          )
+          # Also search recursively in AppData
+          $found = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
+          if ($found) {
+            foreach ($f in $found) {
+              Write-Host "Found log at: $($f.FullName)"
+              Copy-Item $f.FullName "C:\PortalDesktop.log" -Force
+              # Also copy to screenshots dir for upload
+              Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
+            }
+          } else {
+            Write-Host "PortalDesktop.log not found, searching broader..."
+            $found2 = Get-ChildItem -Path "C:\Users" -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
+            if ($found2) {
+              foreach ($f in $found2) {
+                Write-Host "Found log at: $($f.FullName)"
+                Copy-Item $f.FullName "C:\PortalDesktop.log" -Force
+                Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
+              }
+            } else {
+              Write-Host "PortalDesktop.log NOT FOUND anywhere"
+            }
+          }
+
+          # Also look for any AIR debug logs
+          $airLogs = Get-ChildItem -Path $env:APPDATA -Filter "*.log" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "lexia|Lexia" }
+          if ($airLogs) {
+            foreach ($f in $airLogs) {
+              Write-Host "AIR log: $($f.FullName)"
+              Copy-Item $f.FullName "screenshots\$(Split-Path $f.FullName -Leaf)" -Force
+            }
+          }
 
           # Cleanup
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -181,10 +183,11 @@ jobs:
           path: |
             C:\amf-log.txt
             C:\amf-stdout.txt
+            C:\PortalDesktop.log
           retention-days: 30
           if-no-files-found: ignore
 
-      - name: Upload screenshots
+      - name: Upload screenshots and app logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
