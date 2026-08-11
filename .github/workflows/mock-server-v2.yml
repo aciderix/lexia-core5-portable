@@ -244,14 +244,14 @@ jobs:
           # Add mouse_event and GetWindowRect for clicking
           $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
           Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-public class WinRect {
-    [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-}
-"@
+          using System;
+          using System.Runtime.InteropServices;
+          public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+          public class WinRect {
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+          }
+          "@
 
           # Get the actual window position/size (the screenshot dialog shows a 1024x768 window,
           # but its on-screen origin may not be 0,0 - find its real client rect)
