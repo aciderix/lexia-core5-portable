@@ -252,14 +252,18 @@ jobs:
             }
           }
           
-          # APPROACH 2: Fix exercise XML - change dir="../../" to dir="app:/assets_a/"
-          # This makes manifest URLs absolute (app:/assets_a/audio_us/...) instead of relative (../../audio_us/...)
-          # OSMF can't resolve ../../ against app:/ protocol
+          # APPROACH 2: Fix exercise XML - change dir="../../" to absolute file:/// path
+          # OSMF can't resolve ../../ against app:/ protocol, and app:/ URLs give Error #2032
+          # Using file:/// lets OSMF's SoundLoader access local files directly
           Write-Host "=== Fixing exercise XML dir attribute ==="
           $xmlFile = "$assetsDir\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
           if (Test-Path $xmlFile) {
+            # Build file:/// URL from the install path
+            $fileUrl = "file:///" + ($lexiaDir -replace "\\", "/") -replace " ", "%20" -replace "\(", "(" -replace "\)", ")"
+            $dirValue = "$fileUrl/assets_a/"
+            Write-Host "  Using dir=$dirValue"
             $xml = Get-Content $xmlFile -Raw
-            $xml = $xml -replace 'dir="../../"', 'dir="app:/assets_a/"'
+            $xml = $xml -replace 'dir="../../"', "dir=\"$dirValue\""
             Set-Content -Path $xmlFile -Value $xml -NoNewline -Encoding UTF8
             Write-Host "  Fixed dir attribute in $xmlFile"
             # Verify
