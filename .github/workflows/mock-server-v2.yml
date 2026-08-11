@@ -140,60 +140,55 @@ jobs:
             Get-Content $xmlFile | Select-Object -First 80
           }
 
-      - name: Extract SWF strings and inspect sol
+      - name: Inspect AIR config and search for content paths
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
-          $swf = "$lexiaDir\PortalDesktop.swf"
           
-          Write-Host "=== SWF header ==="
-          $bytes = [System.IO.File]::ReadAllBytes($swf)
-          $header = [System.Text.Encoding]::ASCII.GetString($bytes[0..2])
-          Write-Host "Header: $header (FWS=uncompressed, CWS=zlib, ZWS=LZMA)"
-          Write-Host "Size: $($bytes.Length) bytes"
+          Write-Host "=== META-INF contents ==="
+          Get-ChildItem "$lexiaDir\META-INF" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
           
-          # Decompress SWF if needed
-          $swfContent = $null
-          if ($header -eq "CWS") {
-            Write-Host "Decompressing zlib SWF..."
-            $ms = New-Object System.IO.MemoryStream
-            $ms.Write($bytes, 8, $bytes.Length - 8)
-            $ms.Position = 0
-            $deflate = New-Object System.IO.Compression.DeflateStream($ms, [System.IO.Compression.CompressionMode]::Decompress)
-            $reader = New-Object System.IO.StreamReader($deflate)
-            $swfContent = $reader.ReadToEnd()
-            Write-Host "Decompressed size: $($swfContent.Length) chars"
-          } elseif ($header -eq "FWS") {
-            $swfContent = [System.Text.Encoding]::ASCII.GetString($bytes)
-          } else {
-            Write-Host "Unknown format, trying raw..."
-            $swfContent = [System.Text.Encoding]::ASCII.GetString($bytes)
+          Write-Host "=== AIR application descriptor ==="
+          $airXml = Get-ChildItem "$lexiaDir\META-INF" -Filter "*.xml" -ErrorAction SilentlyContinue
+          foreach ($f in $airXml) {
+            Write-Host "--- $($f.Name) ---"
+            Get-Content $f.FullName
           }
           
-          if ($swfContent) {
-            Write-Host "=== Content/path/asset strings ==="
-            $matches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
-              $_.Value -match 'contentPath|assetPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|assetBase|mediaUrl|audioPath|soundPath|contentDir|assets_a|audio_us|xml_us' 
-            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
-            $matches | Select-Object -First 40
-            
-            Write-Host "=== Sound/SoundTask strings ==="
-            $soundMatches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
-              $_.Value -match 'SoundTask|soundUrl|mediaUrl|loadSound|playSound|SoundChannel|onMediaError' 
-            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
-            $soundMatches | Select-Object -First 30
-            
-            Write-Host "=== applicationDirectory/storageDirectory strings ==="
-            $dirMatches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
-              $_.Value -match 'applicationDirectory|applicationStorageDirectory|resolvePath|File::|app:/|app-storage:/' 
-            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
-            $dirMatches | Select-Object -First 30
-            
-            Write-Host "=== URL/path construction strings ==="
-            $urlMatches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
-              $_.Value -match 'URLRequest|file:///|https://|assets/|/audio/|/xml/' 
-            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
-            $urlMatches | Select-Object -First 30
+          Write-Host "=== Config/settings XML files ==="
+          $configFiles = Get-ChildItem $lexiaDir -Filter "*.xml" -Recurse -Depth 1 -ErrorAction SilentlyContinue
+          $configFiles | Select-Object FullName, Length | Format-Table -AutoSize
+          foreach ($f in $configFiles) {
+            Write-Host "--- $($f.Name) ---"
+            Get-Content $f.FullName | Select-Object -First 30
+          }
+          
+          Write-Host "=== Search for content path in all XML files ==="
+          $allXml = Get-ChildItem $lexiaDir -Filter "*.xml" -Recurse -ErrorAction SilentlyContinue
+          foreach ($f in $allXml) {
+            $content = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
+            if ($content -match 'contentPath|assetPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|mediaUrl|audioPath|soundPath|contentDir|assetDir') {
+              Write-Host "FOUND in: $($f.FullName)"
+              $content | Select-String -Pattern 'contentPath|assetPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|mediaUrl|audioPath|soundPath|contentDir|assetDir' -AllMatches | Select-Object -First 5
+            }
+          }
+          
+          Write-Host "=== Search for content path in all JSON/config files ==="
+          $jsonFiles = Get-ChildItem $lexiaDir -Filter "*.json" -Recurse -ErrorAction SilentlyContinue
+          $jsonFiles | Select-Object FullName | Format-Table -AutoSize
+          
+          Write-Host "=== Exercise SWF files for bascateg ==="
+          Get-ChildItem "$lexiaDir\assets_a\graphics\a01_bascateg" -Filter "*.swf" -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
+          
+          Write-Host "=== AppData after run - .sol files ==="
+          Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+          
+          Write-Host "=== AppData full listing ==="
+          $appDataDir = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
+          if (Test-Path $appDataDir) {
+            Get-ChildItem $appDataDir -Recurse -ErrorAction SilentlyContinue | Select-Object FullName -First 30 | Format-Table -AutoSize
+          } else {
+            Write-Host "AppData dir not found"
           }
 
       - name: Setup hosts redirect and proxy
