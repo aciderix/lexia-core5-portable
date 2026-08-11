@@ -22,6 +22,37 @@ class AMFClient {
     }
     
     /**
+     * Called when the user enters a "teacher email" on the
+     * "set up this computer" screen (Student/Parent flow).
+     * Returns TeacherResponseVO - must have isAuthenticated=true
+     * and a siteId/siteName for the flow to continue to verifySiteId/login.
+     */
+    public function getCustomerFromTeacher($req = null) {
+        $response = new stdClass();
+        $response->_explicitType = 'com.lexialearning.lrs.api.TeacherResponseVO';
+        $response->siteId = "1";
+        $response->siteName = "Portable Site";
+        $response->isAuthenticated = true;
+        $response->errorCode = 0;
+        $response->errorMessage = null;
+        return $response;
+    }
+    
+    /**
+     * Called after getCustomerFromTeacher to verify the site ID.
+     * Returns VerifySiteIdResponseVO with isValid=true.
+     */
+    public function verifySiteId($req = null) {
+        $response = new stdClass();
+        $response->_explicitType = 'com.lexialearning.lrs.api.VerifySiteIdResponseVO';
+        $response->siteName = "Portable Site";
+        $response->isValid = true;
+        $response->errorCode = 0;
+        $response->errorMessage = null;
+        return $response;
+    }
+    
+    /**
      * Login response - called after handshake
      * Returns LoginResponseVO with a fake auth token
      */
