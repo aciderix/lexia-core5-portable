@@ -182,6 +182,18 @@ jobs:
             }
           }
           Write-Host "  Fixed dir attribute in $fixedCount / $($xmlFiles.Count) XML files"
+          
+          # Create setup.properties and crossdomain.xml for plain HTTP asset loading (port 8081)
+          Write-Host "=== Setting up setup.properties & crossdomain.xml for HTTP asset server ==="
+          $setupContent = "contentUrl=http://127.0.0.1:8081/assets_a/`ncontentURL=http://127.0.0.1:8081/assets_a/"
+          $crossdomainContent = '<?xml version="1.0"?><!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd"><cross-domain-policy><allow-access-from domain="*" headers="*" secure="false" /><site-control permitted-cross-domain-policies="all" /></cross-domain-policy>'
+          
+          Set-Content -Path "$lexiaDir\setup.properties" -Value $setupContent -Encoding UTF8
+          Set-Content -Path "$lexiaDir\crossdomain.xml" -Value $crossdomainContent -Encoding UTF8
+          
+          if (-not (Test-Path $appDataDir)) { New-Item -ItemType Directory -Force -Path $appDataDir | Out-Null }
+          Set-Content -Path "$appDataDir\setup.properties" -Value $setupContent -Encoding UTF8
+          Set-Content -Path "$appDataDir\crossdomain.xml" -Value $crossdomainContent -Encoding UTF8
 
       - name: Setup hosts redirect and proxy
         shell: pwsh

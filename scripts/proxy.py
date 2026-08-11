@@ -226,12 +226,38 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+import threading
+
+def run_http_asset_server():
+    class AssetHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=CONTENT_ROOT, **kwargs)
+        
+        def end_headers(self):
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Headers', '*')
+            super().end_headers()
+            
+        def log_message(self, format, *args):
+            pass
+
+    try:
+        httpd = http.server.HTTPServer(('0.0.0.0', 8081), AssetHandler)
+        log("HTTP Asset Server listening on http://0.0.0.0:8081 -> " + CONTENT_ROOT)
+        httpd.serve_forever()
+    except Exception as e:
+        log(f"HTTP Asset Server error: {e}")
+
 def main():
     with open(LOG_FILE, "w") as f:
         f.write(f"HTTPS Proxy starting at {datetime.datetime.now().isoformat()}\n")
     
     log("HTTPS Proxy (443 -> PHP 8080) starting...")
     cert_file, key_file = generate_self_signed_cert()
+    
+    # Start HTTP asset server on port 8081 in background thread
+    t = threading.Thread(target=run_http_asset_server, daemon=True)
+    t.start()
     
     if cert_file and os.path.exists(cert_file) and os.path.exists(key_file):
         log(f"Using cert: {cert_file}")

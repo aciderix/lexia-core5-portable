@@ -19,7 +19,7 @@ class AMFClient {
         $response->_explicitType = 'com.lexialearning.lrs.api.HandshakeResponseVO';
         $response->errorCode = 0;
         $response->errorMessage = null;
-        $response->contentUrl = "https://student.mylexia.com/assets_a/";
+        $response->contentUrl = "http://127.0.0.1:8081/assets_a/";
         return $response;
     }
     
@@ -63,7 +63,7 @@ class AMFClient {
         $response->personName = "Admin Portable";
         $response->language = "en-US";
         $response->region = "us";
-        $response->contentUrl = "https://student.mylexia.com/assets_a/";
+        $response->contentUrl = "http://127.0.0.1:8081/assets_a/";
         $response->purpose = "course";
         $response->currentPhaseId = "a01";
         $response->currentUnitIdList = array();

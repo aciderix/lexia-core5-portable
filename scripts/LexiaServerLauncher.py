@@ -182,6 +182,55 @@ def fix_exercise_xml_and_junctions():
     if fixed_count > 0:
         print(f"[✓] Attribut dir corrigé (../../) dans {fixed_count} fichiers XML d'exercices.")
 
+def setup_asset_config():
+    lexia_dir = r"C:\Program Files (x86)\Lexia Core5"
+    appdata = os.environ.get("APPDATA", "")
+    appdata_dir = os.path.join(appdata, "com.lexiareading.core5.desktop.us", "Local Store") if appdata else ""
+    
+    crossdomain = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd">\n'
+        '<cross-domain-policy>\n'
+        '  <allow-access-from domain="*" headers="*" secure="false" />\n'
+        '  <site-control permitted-cross-domain-policies="all" />\n'
+        '</cross-domain-policy>\n'
+    )
+    
+    setup_prop = (
+        "contentUrl=http://127.0.0.1:8081/assets_a/\n"
+        "contentURL=http://127.0.0.1:8081/assets_a/\n"
+    )
+    
+    for base in [lexia_dir, appdata_dir]:
+        if base and os.path.exists(base):
+            try:
+                with open(os.path.join(base, "crossdomain.xml"), "w", encoding="utf-8") as f:
+                    f.write(crossdomain)
+                with open(os.path.join(base, "setup.properties"), "w", encoding="utf-8") as f:
+                    f.write(setup_prop)
+            except Exception: pass
+    print("[✓] Configuration des assets HTTP (setup.properties & crossdomain.xml) créée.")
+
+def run_http_asset_server():
+    content_root = r"C:\Program Files (x86)\Lexia Core5"
+    class AssetHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=content_root, **kwargs)
+        
+        def end_headers(self):
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Headers', '*')
+            super().end_headers()
+            
+        def log_message(self, format, *args): pass
+
+    try:
+        httpd = http.server.HTTPServer(('0.0.0.0', 8081), AssetHandler)
+        print("[✓] Serveur HTTP Assets écoute sur le port 8081")
+        httpd.serve_forever()
+    except Exception as e:
+        print(f"[!] Erreur serveur HTTP Assets 8081 : {e}")
+
 def generate_cert(cert_dir):
     os.makedirs(cert_dir, exist_ok=True)
     cert_file = os.path.join(cert_dir, "cert.pem")
@@ -512,6 +561,10 @@ def main():
     apply_hosts_redirection()
     place_sol_file()
     fix_exercise_xml_and_junctions()
+    setup_asset_config()
+
+    t_http = threading.Thread(target=run_http_asset_server, daemon=True)
+    t_http.start()
     
     cert_dir = os.path.join(tempfile.gettempdir(), "lexia_certs")
     cert_file, key_file = generate_cert(cert_dir)
