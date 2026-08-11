@@ -99,6 +99,29 @@ jobs:
             if ($modified) { Set-Content $_.FullName -Value $fcontent -NoNewline }
           }
 
+      - name: Inspect installed content
+        shell: pwsh
+        run: |
+          $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
+          Write-Host "=== App directory ==="
+          Get-ChildItem $lexiaDir -ErrorAction SilentlyContinue | Format-Table Name,Length,Mode -AutoSize
+          Write-Host "=== Looking for content/media directories ==="
+          Get-ChildItem $lexiaDir -Recurse -Directory -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -AutoSize
+          Write-Host "=== Looking for MP3 files ==="
+          $mp3s = Get-ChildItem $lexiaDir -Recurse -Filter "*.mp3" -ErrorAction SilentlyContinue
+          if ($mp3s) {
+            $mp3s | Select-Object FullName -First 20 | Format-Table -AutoSize
+            Write-Host "Total MP3 files: $($mp3s.Count)"
+          } else {
+            Write-Host "NO MP3 FILES FOUND!"
+          }
+          Write-Host "=== Looking for bascateg content ==="
+          Get-ChildItem $lexiaDir -Recurse -Filter "*bascateg*" -ErrorAction SilentlyContinue | Select-Object FullName -First 20 | Format-Table -AutoSize
+          Write-Host "=== Looking for words_can_grouped ==="
+          Get-ChildItem $lexiaDir -Recurse -Filter "*words_can*" -ErrorAction SilentlyContinue | Select-Object FullName
+          Write-Host "=== AppData Lexia ==="
+          Get-ChildItem "$env:APPDATA" -Recurse -Directory -Depth 3 -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "lexia" } | Select-Object FullName | Format-Table -AutoSize
+
       - name: Setup hosts redirect and proxy
         shell: pwsh
         run: |
