@@ -299,28 +299,35 @@ jobs:
           }
 
           # ============================================================
-          # STEP 7: Click on first level (green button at ~458,394)
+          # STEP 7: Click on activity thumbnail (exact coords confirmed
+          # from user screenshot: white thumbnail boxes inside the yellow
+          # card, NOT the icons above them). All at y~=282-283:
+          #   Rhyming: (299,282)  Letter Matching: (441,282)
+          #   Categorizing Pictures: (582,283)  Nursery Rhymes: (725,282)
           # ============================================================
-          Write-Host "=== Clicking first level button ==="
+          Write-Host "=== Clicking activity thumbnail ==="
           TakeScreenshot "13-level-screen.png"
-          
-          # Try the first green level button (center ~458,394)
-          ClickAt 458 394 "Level 1 button (green)"
+
+          ClickAt 582 283 "Categorizing Pictures thumbnail"
           Start-Sleep -Seconds 5
-          TakeScreenshot "14-after-level-click.png"
-          
-          # Also try the second green button (center ~631,445)
-          ClickAt 631 445 "Level 2 button (green)"
+          TakeScreenshot "14-after-categorizing-click.png"
+
+          # Backup attempts on the other thumbnails in case the first
+          # one is locked or the click missed
+          ClickAt 299 282 "Rhyming thumbnail"
           Start-Sleep -Seconds 5
-          TakeScreenshot "15-after-level2-click.png"
-          
-          # Try the small green circle (center ~246,349)
-          ClickAt 246 349 "Small green circle"
+          TakeScreenshot "15-after-rhyming-click.png"
+
+          ClickAt 441 282 "Letter Matching thumbnail"
           Start-Sleep -Seconds 5
-          TakeScreenshot "16-after-small-green.png"
-          
+          TakeScreenshot "16-after-lettermatching-click.png"
+
+          ClickAt 725 282 "Nursery Rhymes thumbnail"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "17-after-nurseryrhymes-click.png"
+
           # Wait and capture progress
-          for ($i = 17; $i -le 25; $i++) {
+          for ($i = 18; $i -le 26; $i++) {
             Start-Sleep -Seconds 5
             TakeScreenshot ("{0:D2}-progress.png" -f $i)
           }
