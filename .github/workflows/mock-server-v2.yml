@@ -61,11 +61,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path "C:\amfphp" | Out-Null
           Copy-Item -Path "$($amfphpDir.FullName)\*" -Destination "C:\amfphp" -Recurse -Force
           
-          # Copy our service
           Copy-Item "scripts/AMFClient.php" -Destination "C:\amfphp\Amfphp\Services\AMFClient.php" -Force
           Write-Host "AMFClient.php copied"
           
-          # Verify index.php location
           $indexFile = "C:\amfphp\Amfphp\index.php"
           if (Test-Path $indexFile) {
             Write-Host "Gateway found at: $indexFile"
@@ -74,10 +72,7 @@ jobs:
             exit 1
           }
           
-          # Patch PHP 8.x compatibility issues in AMFPHP
           Write-Host "=== Patching AMFPHP for PHP 8.x compat ==="
-          
-          # Fix 1: AmfphpErrorHandler - custom_warning_handler() expects 5 args, PHP 8 passes 4
           $errorHandlerFile = "C:\amfphp\Amfphp\Plugins\AmfphpErrorHandler\AmfphpErrorHandler.php"
           if (Test-Path $errorHandlerFile) {
             $ehContent = Get-Content $errorHandlerFile -Raw
@@ -86,28 +81,22 @@ jobs:
             Write-Host "  Patched AmfphpErrorHandler: 5th param now optional"
           }
           
-          # Fix 2: Check for and patch each() usage (removed in PHP 8.0)
           Get-ChildItem -Path "C:\amfphp\Amfphp" -Filter "*.php" -Recurse | ForEach-Object {
             $fcontent = Get-Content $_.FullName -Raw
             $modified = $false
             if ($fcontent -match '\beach\s*\(') {
-              Write-Host "  Patching each() in $($_.Name)"
               $fcontent = $fcontent -replace 'while\(\s*each\(\$(\w+)\)\s*\)\s*{', 'foreach ($$$1 as $__key => $__val) {'
               $modified = $true
             }
             if ($fcontent -match 'get_magic_quotes_gpc\s*\(') {
-              Write-Host "  Patching get_magic_quotes_gpc() in $($_.Name)"
               $fcontent = $fcontent -replace 'get_magic_quotes_gpc\(\)', 'false'
               $modified = $true
             }
             if ($fcontent -match 'get_magic_quotes_runtime\s*\(') {
-              Write-Host "  Patching get_magic_quotes_runtime() in $($_.Name)"
               $fcontent = $fcontent -replace 'get_magic_quotes_runtime\(\)', 'false'
               $modified = $true
             }
-            if ($modified) {
-              Set-Content $_.FullName -Value $fcontent -NoNewline
-            }
+            if ($modified) { Set-Content $_.FullName -Value $fcontent -NoNewline }
           }
           
           Write-Host "=== Services directory ==="
@@ -142,6 +131,21 @@ jobs:
 
           $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
           $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
+          $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
+          # keybd_event for hardware-level keyboard input (more reliable than SendKeys for special keys)
+          $ke = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);" -Name KE -Namespace W -PassThru
+
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+          public class WinRect {
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+              [DllImport("user32.dll")]
+              public static extern bool SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+          }
+          "@
 
           # ============================================================
           # STEP 1: Start PHP server
@@ -152,13 +156,10 @@ jobs:
           }
           Start-Sleep -Seconds 3
           
-          Write-Host "Testing PHP server..."
           try {
             $testResp = Invoke-WebRequest -Uri "http://127.0.0.1:8080/Amfphp/index.php" -UseBasicParsing -TimeoutSec 5
             Write-Host "PHP server OK: $($testResp.StatusCode)"
-          } catch {
-            Write-Host "PHP server test: $_"
-          }
+          } catch { Write-Host "PHP server test: $_" }
 
           # ============================================================
           # STEP 2: Start HTTPS proxy
@@ -166,7 +167,6 @@ jobs:
           Write-Host "Starting HTTPS proxy on port 443..."
           $proxyJob = Start-Job -ScriptBlock { python C:\proxy.py 2>&1 | Out-File C:\proxy-stdout.txt -Encoding UTF8 }
           Start-Sleep -Seconds 5
-          
           netstat -an | Select-String ":443 ",":8080 "
 
           # ============================================================
@@ -182,76 +182,48 @@ jobs:
           Write-Host "Killing first instance..."
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep -Seconds 3
-          
-          # ============================================================
-          # STEP 4: Find SharedObject directory and place .sol file
-          # ============================================================
-          Write-Host "=== Searching for #SharedObjects directory ==="
-          $solPlaced = $false
-          
-          # Search common AIR SharedObject locations
-          $searchPaths = @(
-            "$env:APPDATA",
-            "$env:LOCALAPPDATA"
-          )
-          
-          foreach ($searchPath in $searchPaths) {
-            Write-Host "Searching in: $searchPath"
-            $soDirs = Get-ChildItem -Path $searchPath -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
-            foreach ($soDir in $soDirs) {
-              Write-Host "Found #SharedObjects at: $($soDir.FullName)"
-              # List subdirectories (might contain PortalDesktop.swf or be flat)
-              $subDirs = Get-ChildItem -Path $soDir.FullName -Directory -ErrorAction SilentlyContinue
-              if ($subDirs) {
-                foreach ($sub in $subDirs) {
-                  Write-Host "  Subdir: $($sub.Name)"
-                  $solDest = Join-Path $sub.FullName "CORE5.sol"
-                  Copy-Item "C:\CORE5.sol" $solDest -Force
-                  Write-Host "  Placed CORE5.sol at: $solDest"
-                  $solPlaced = $true
-                }
-              }
-              # Also place directly in #SharedObjects root
-              $solDestRoot = Join-Path $soDir.FullName "CORE5.sol"
-              Copy-Item "C:\CORE5.sol" $solDestRoot -Force
-              Write-Host "  Also placed CORE5.sol at: $solDestRoot"
-              $solPlaced = $true
-            }
-          }
-          
-          # Also search for any directory that looks like an AIR app data folder
-          if (-not $solPlaced) {
-            Write-Host "No #SharedObjects found yet, searching for AIR app data..."
-            $airDirs = Get-ChildItem -Path "$env:APPDATA" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "lexia|Lexia|core5|Core5|Adobe" }
-            foreach ($airDir in $airDirs) {
-              Write-Host "Found potential AIR dir: $($airDir.FullName)"
-              $soPath = Join-Path $airDir.FullName "#SharedObjects"
-              New-Item -ItemType Directory -Force -Path $soPath | Out-Null
-              # Create subdirectory for the SWF name
-              $swfPath = Join-Path $soPath "PortalDesktop.swf"
-              New-Item -ItemType Directory -Force -Path $swfPath | Out-Null
-              $solDest = Join-Path $swfPath "CORE5.sol"
-              Copy-Item "C:\CORE5.sol" $solDest -Force
-              Write-Host "  Created and placed CORE5.sol at: $solDest"
-              $solPlaced = $true
-            }
-          }
-          
-          # Also check the AIR encrypted store path
-          if (-not $solPlaced) {
-            Write-Host "Searching for Lexia in all AppData..."
-            $allAir = Get-ChildItem -Path "$env:APPDATA" -Directory -ErrorAction SilentlyContinue
-            foreach ($dir in $allAir) {
-              Write-Host "  AppData dir: $($dir.Name)"
-            }
-          }
-          
-          Write-Host "SOL placed: $solPlaced"
 
           # ============================================================
-          # STEP 5: Second app launch - with siteId pre-set
+          # STEP 4: Find and analyze original .sol, then place our modified one
           # ============================================================
-          Write-Host "=== Second app launch (with SharedObject siteId) ==="
+          Write-Host "=== Searching for #SharedObjects directory ==="
+          $solDir = $null
+          $soDirs = Get-ChildItem -Path "$env:APPDATA","$env:LOCALAPPDATA" -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
+          foreach ($soDir in $soDirs) {
+            Write-Host "Found #SharedObjects at: $($soDir.FullName)"
+            if ($soDir.FullName -match "com\.lexiareading") {
+              $solDir = $soDir.FullName
+            }
+          }
+          
+          if ($solDir) {
+            Write-Host "Using Lexia SharedObject dir: $solDir"
+            # List all existing .sol files
+            Get-ChildItem -Path $solDir -Recurse -Filter "*.sol" | ForEach-Object {
+              Write-Host "  Found: $($_.FullName) ($($_.Length) bytes)"
+              # Copy original .sol to artifacts for analysis
+              Copy-Item $_.FullName "screenshots\original_CORE5.sol" -Force
+            }
+            
+            # Place our .sol in all subdirectories
+            $subDirs = Get-ChildItem -Path $solDir -Directory -ErrorAction SilentlyContinue
+            if ($subDirs) {
+              foreach ($sub in $subDirs) {
+                $solDest = Join-Path $sub.FullName "CORE5.sol"
+                Copy-Item "C:\CORE5.sol" $solDest -Force
+                Write-Host "  Placed CORE5.sol at: $solDest"
+              }
+            }
+            # Also place in root
+            $solDestRoot = Join-Path $solDir "CORE5.sol"
+            Copy-Item "C:\CORE5.sol" $solDestRoot -Force
+            Write-Host "  Placed CORE5.sol at: $solDestRoot"
+          }
+
+          # ============================================================
+          # STEP 5: Second app launch
+          # ============================================================
+          Write-Host "=== Second app launch ==="
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "App PID: $($proc.Id)"
           Start-Sleep -Seconds 25
@@ -266,9 +238,7 @@ jobs:
               $fg::SetForegroundWindow($p.MainWindowHandle) | Out-Null
               Start-Sleep -Seconds 3
             }
-          } else {
-            Write-Host "Process not found! App may have crashed."
-          }
+          } else { Write-Host "Process not found!" }
 
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
           $bounds = $screen.Bounds
@@ -281,21 +251,6 @@ jobs:
             $g.Dispose(); $bmp.Dispose()
           }
           
-          TakeScreenshot "01-initial.png"
-          Start-Sleep -Seconds 5
-
-          # Add mouse_event and GetWindowRect
-          $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
-          Add-Type -TypeDefinition @"
-          using System;
-          using System.Runtime.InteropServices;
-          public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-          public class WinRect {
-              [DllImport("user32.dll")]
-              public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-          }
-          "@
-
           $p2 = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
           $winLeft = 0; $winTop = 0
           if ($p2 -and $p2.MainWindowHandle -ne 0) {
@@ -318,113 +273,149 @@ jobs:
             Start-Sleep -Seconds 2
           }
 
-          # ============================================================
-          # STEP 6: Handle whatever screen appears
-          # ============================================================
-          # With siteId pre-set, the app should skip SetupScreen and go to:
-          #   VerifySiteScreen (loading) -> VerifyStudentScreen (login form)
-          # OR if siteId bypass didn''t work, we''ll see the SetupScreen
-          #   and need to click Student/Parent -> type email -> click Next
-          
+          # Hardware-level keyboard event function (more reliable than SendKeys)
+          function PressKey($vk) {
+            $ke::keybd_event($vk, 0, 0, [UIntPtr]::Zero)   # key down
+            Start-Sleep -Milliseconds 50
+            $ke::keybd_event($vk, 0, 2, [UIntPtr]::Zero)   # key up (KEYEVENTF_KEYUP=2)
+            Start-Sleep -Milliseconds 200
+          }
+
+          TakeScreenshot "01-initial.png"
           Start-Sleep -Seconds 5
-          TakeScreenshot "02-after-wait.png"
+
+          # ============================================================
+          # STEP 6: Handle the SetupScreen
+          # ============================================================
           
-          # STRATEGY A: If we see the SetupScreen (first-time setup with email entry)
-          # Click the Student/Parent button (same as before)
-          Write-Host "=== Attempting Student/Parent button click ==="
+          # Click the Student/Parent button (known working coords)
+          Write-Host "=== Clicking Student/Parent button ==="
           ClickAt 666 381 "Student/Parent button"
-          TakeScreenshot "03-after-student-parent.png"
+          TakeScreenshot "02-after-student-parent.png"
           
           Start-Sleep -Seconds 3
-          TakeScreenshot "04-teacher-email-screen.png"
+          TakeScreenshot "03-teacher-email-screen.png"
           
           # Type teacher email
           Write-Host "=== Entering teacher email ==="
           ClickAt 529 364 "Teacher email field"
           Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("teacher@portable.local")
+          [System.Windows.Forms.SendKeys]::SendWait("teacher@school.edu")
           Start-Sleep -Seconds 1
-          TakeScreenshot "05-email-typed.png"
-          
-          # STRATEGY: Try keyboard navigation (TAB + SPACE) to click the Next button
-          # Flex apps support keyboard focus navigation:
-          #   TAB moves to next focusable element
-          #   SPACE activates the focused button
-          Write-Host "=== Keyboard navigation: TAB to Next button then SPACE ==="
-          
-          # First, click the email field to ensure focus is there
-          ClickAt 529 364 "Refocus email field"
-          Start-Sleep -Milliseconds 500
-          
-          # TAB once -> should move to previous button
-          [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
-          Start-Sleep -Milliseconds 500
-          TakeScreenshot "06-after-first-tab.png"
-          
-          # TAB again -> should move to next button
-          [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
-          Start-Sleep -Milliseconds 500
-          TakeScreenshot "07-after-second-tab.png"
-          
-          # Press SPACE to activate the focused button
-          Write-Host "  Pressing SPACE to activate button..."
-          [System.Windows.Forms.SendKeys]::SendWait(" ")
-          Start-Sleep -Seconds 5
-          TakeScreenshot "08-after-space.png"
-          
-          # Also try ENTER
-          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-          Start-Sleep -Seconds 5
-          TakeScreenshot "09-after-enter.png"
-          
-          # If keyboard didn''t work, try clicking the Next button directly
-          Write-Host "=== Fallback: direct click on Next button ==="
-          ClickAt 565 503 "Next button direct click"
-          Start-Sleep -Seconds 5
-          TakeScreenshot "10-after-direct-click.png"
-          
-          # Try double-click
-          ClickAt 565 503 "Next button first click"
-          Start-Sleep -Milliseconds 200
-          $me::mouse_event(0x02, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 100
-          $me::mouse_event(0x04, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 100
-          $me::mouse_event(0x02, 0, 0, 0, 0)
-          Start-Sleep -Milliseconds 100
-          $me::mouse_event(0x04, 0, 0, 0, 0)
-          Start-Sleep -Seconds 5
-          TakeScreenshot "11-after-doubleclick.png"
+          TakeScreenshot "04-email-typed.png"
           
           # ============================================================
-          # STRATEGY B: If we see a student login screen (siteId bypass worked)
-          # The VerifyStudentScreen should have username/password fields
+          # KEY FIX: Click the Next button at CORRECTED coordinates
+          # Pixel analysis shows the arrow icon is at (478, 516) not (565, 503)
           # ============================================================
-          Write-Host "=== Checking for student login screen ==="
-          TakeScreenshot "12-check-login.png"
+          Write-Host "=== Clicking Next button (corrected coords) ==="
           
-          # Try typing student credentials (in case we''re on a login screen)
-          # Click center of screen where username field might be
+          # Try center of the arrow icon
+          ClickAt 478 516 "Next arrow center"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "05-after-next-click.png"
+          
+          # If that didn''t work, try slightly different positions around the arrow
+          Write-Host "=== Scanning for button hit area ==="
+          $positions = @(
+            @(470, 510, "upper-left"),
+            @(490, 520, "lower-right"),
+            @(475, 500, "above"),
+            @(480, 530, "below"),
+            @(465, 515, "left"),
+            @(495, 515, "right"),
+            @(478, 516, "center-retry")
+          )
+          foreach ($pos in $positions) {
+            ClickAt $pos[0] $pos[1] $pos[2]
+            Start-Sleep -Seconds 3
+            TakeScreenshot "06-scan-$($pos[2]).png"
+          }
+          
+          # ============================================================
+          # Fallback: Hardware-level Enter key
+          # ============================================================
+          Write-Host "=== Hardware Enter key ==="
+          # VK_RETURN = 0x0D = 13
+          PressKey 13
+          Start-Sleep -Seconds 5
+          TakeScreenshot "07-after-hw-enter.png"
+          
+          # Try TAB + Enter (move to next field then submit)
+          Write-Host "=== Hardware TAB + Enter ==="
+          # VK_TAB = 0x09
+          PressKey 9
+          Start-Sleep -Milliseconds 500
+          PressKey 13
+          Start-Sleep -Seconds 5
+          TakeScreenshot "08-after-hw-tab-enter.png"
+          
+          # Try TAB + SPACE (VK_SPACE = 0x20 = 32)
+          Write-Host "=== Hardware TAB + SPACE ==="
+          PressKey 9
+          Start-Sleep -Milliseconds 500
+          PressKey 32
+          Start-Sleep -Seconds 5
+          TakeScreenshot "09-after-hw-tab-space.png"
+          
+          # Try double-TAB + Enter (skip past one more element)
+          PressKey 9
+          Start-Sleep -Milliseconds 300
+          PressKey 9
+          Start-Sleep -Milliseconds 500
+          PressKey 13
+          Start-Sleep -Seconds 5
+          TakeScreenshot "10-after-doubletab-enter.png"
+          
+          # ============================================================
+          # Fallback: SendMessage WM_LBUTTONDOWN/UP directly to window
+          # ============================================================
+          Write-Host "=== SendMessage approach ==="
+          $hWnd = $p2.MainWindowHandle
+          if ($hWnd -ne 0) {
+            # WM_LBUTTONDOWN = 0x201, WM_LBUTTONUP = 0x202
+            $lParam = [IntPtr]((478) -bor (516 -shl 16))
+            [WinRect]::SendMessage($hWnd, 0x201, [IntPtr]::Zero, $lParam) | Out-Null
+            Start-Sleep -Milliseconds 100
+            [WinRect]::SendMessage($hWnd, 0x202, [IntPtr]::Zero, $lParam) | Out-Null
+            Start-Sleep -Seconds 5
+            TakeScreenshot "11-after-sendmessage.png"
+          }
+          
+          # ============================================================
+          # Check if we got past the email screen
+          # ============================================================
+          Write-Host "=== Checking current state ==="
+          TakeScreenshot "12-current-state.png"
+          
+          # If a login screen appeared, try entering student credentials
           ClickAt 512 350 "Possible username field"
           Start-Sleep -Milliseconds 500
+          [System.Windows.Forms.SendKeys]::SendWait("{END}")
+          Start-Sleep -Milliseconds 200
+          [System.Windows.Forms.SendKeys]::SendWait("+{HOME}")  # select all
+          Start-Sleep -Milliseconds 200
+          [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")  # clear field
+          Start-Sleep -Milliseconds 200
           [System.Windows.Forms.SendKeys]::SendWait("student")
           Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
+          PressKey 9
           Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("password")
           Start-Sleep -Milliseconds 500
-          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          TakeScreenshot "13-credentials-entered.png"
+          PressKey 13
           Start-Sleep -Seconds 10
-          TakeScreenshot "13-after-student-login.png"
+          TakeScreenshot "14-after-login.png"
           
           # Wait for app to progress
-          for ($i = 14; $i -le 22; $i++) {
+          for ($i = 15; $i -le 22; $i++) {
             Start-Sleep -Seconds 5
             TakeScreenshot ("{0:D2}-progress.png" -f $i)
           }
 
           # ============================================================
-          # STEP 7: Collect all logs and results
+          # STEP 7: Collect all logs
           # ============================================================
           Write-Host "=== Proxy stdout ==="
           if (Test-Path C:\proxy-stdout.txt) { Get-Content C:\proxy-stdout.txt }
@@ -432,46 +423,30 @@ jobs:
           if (Test-Path C:\php-stdout.txt) { Get-Content C:\php-stdout.txt }
           Write-Host "=== AMF/Proxy Log ==="
           if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No proxy log" }
-          Write-Host "=== netstat ==="
-          netstat -an | Select-String ":443 ",":8080 "
           Write-Host "=== Processes ==="
           Get-Process -Name "python","php","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
           # Find and copy PortalDesktop.log
-          Write-Host "=== Searching for PortalDesktop.log ==="
+          Write-Host "=== PortalDesktop.log ==="
           $found = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
           if ($found) {
             foreach ($f in $found) {
-              Write-Host "Found log at: $($f.FullName)"
-              Copy-Item $f.FullName "C:\PortalDesktop.log" -Force
+              Write-Host "Found: $($f.FullName)"
               Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
             }
-            Write-Host "=== PortalDesktop.log contents ==="
-            Get-Content "C:\PortalDesktop.log"
-          } else {
-            Write-Host "PortalDesktop.log not found, searching broader..."
-            $found2 = Get-ChildItem -Path "C:\Users" -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
-            if ($found2) {
-              foreach ($f in $found2) {
-                Write-Host "Found: $($f.FullName)"
-                Copy-Item $f.FullName "C:\PortalDesktop.log" -Force
-                Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
-              }
-              Write-Host "=== PortalDesktop.log contents ==="
-              Get-Content "C:\PortalDesktop.log"
-            }
-          }
+            Get-Content $found[0].FullName
+          } else { Write-Host "PortalDesktop.log not found" }
 
-          # List all SharedObject directories found (for debugging)
-          Write-Host "=== All #SharedObjects directories ==="
-          $allSO = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
+          # List all .sol files
+          Write-Host "=== All .sol files ==="
+          $allSO = Get-ChildItem -Path "$env:APPDATA","$env:LOCALAPPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue
           if ($allSO) {
             foreach ($so in $allSO) {
-              Write-Host "  $($so.FullName)"
-              Get-ChildItem $so.FullName -Recurse | ForEach-Object { Write-Host "    $($_.FullName)" }
+              Write-Host "  $($so.FullName) ($($so.Length) bytes)"
+              # Copy all .sol files to artifacts
+              $destName = "sol_" + [System.IO.Path]::GetFileName($so.Directory.Name) + "_" + $so.Name
+              Copy-Item $so.FullName "screenshots\$destName" -Force
             }
-          } else {
-            Write-Host "  None found"
           }
 
           # Cleanup
