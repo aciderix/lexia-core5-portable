@@ -140,6 +140,50 @@ jobs:
             Get-Content $xmlFile | Select-Object -First 80
           }
 
+      - name: Extract SWF strings and inspect sol
+        shell: pwsh
+        run: |
+          $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
+          $swf = "$lexiaDir\PortalDesktop.swf"
+          
+          Write-Host "=== SWF size ==="
+          (Get-Item $swf).Length
+          
+          Write-Host "=== Content path related strings from SWF ==="
+          $bytes = [System.IO.File]::ReadAllBytes($swf)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          # Find strings containing path/content/asset/audio/url/cdn keywords
+          $matches = [regex]::Matches($ascii, '[\x20-\x7E]{8,}') | Where-Object { 
+            $_.Value -match 'content|assetPath|contentPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|assetBase|mediaUrl|audioPath|soundPath' 
+          } | Select-Object -ExpandProperty Value -Unique | Sort-Object
+          $matches | Select-Object -First 30
+          
+          Write-Host "=== Sound/SoundTask related strings ==="
+          $soundMatches = [regex]::Matches($ascii, '[\x20-\x7E]{6,}') | Where-Object { 
+            $_.Value -match 'SoundTask|SoundUrl|soundUrl|mediaUrl|loadSound|playSound' 
+          } | Select-Object -ExpandProperty Value -Unique | Sort-Object
+          $soundMatches | Select-Object -First 20
+          
+          Write-Host "=== .sol file hexdump ==="
+          $solPath = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store\#SharedObjects\CORE5.sol"
+          if (Test-Path $solPath) {
+            $solBytes = [System.IO.File]::ReadAllBytes($solPath)
+            Write-Host "Size: $($solBytes.Length) bytes"
+            # Print as hex
+            $hex = ($solBytes | ForEach-Object { $_.ToString("X2") }) -join ' '
+            Write-Host $hex
+            # Also print as ASCII where possible
+            $asciiSol = [System.Text.Encoding]::ASCII.GetString($solBytes) -replace '[^\x20-\x7E]', '.'
+            Write-Host "ASCII: $asciiSol"
+          } else {
+            Write-Host ".sol file not found at: $solPath"
+            # Search for any .sol files
+            Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Select-Object FullName, Length
+          }
+          
+          Write-Host "=== All .sol files ==="
+          Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+
       - name: Setup hosts redirect and proxy
         shell: pwsh
         run: |
