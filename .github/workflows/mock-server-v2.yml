@@ -146,43 +146,55 @@ jobs:
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
           $swf = "$lexiaDir\PortalDesktop.swf"
           
-          Write-Host "=== SWF size ==="
-          (Get-Item $swf).Length
-          
-          Write-Host "=== Content path related strings from SWF ==="
+          Write-Host "=== SWF header ==="
           $bytes = [System.IO.File]::ReadAllBytes($swf)
-          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
-          # Find strings containing path/content/asset/audio/url/cdn keywords
-          $matches = [regex]::Matches($ascii, '[\x20-\x7E]{8,}') | Where-Object { 
-            $_.Value -match 'content|assetPath|contentPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|assetBase|mediaUrl|audioPath|soundPath' 
-          } | Select-Object -ExpandProperty Value -Unique | Sort-Object
-          $matches | Select-Object -First 30
+          $header = [System.Text.Encoding]::ASCII.GetString($bytes[0..2])
+          Write-Host "Header: $header (FWS=uncompressed, CWS=zlib, ZWS=LZMA)"
+          Write-Host "Size: $($bytes.Length) bytes"
           
-          Write-Host "=== Sound/SoundTask related strings ==="
-          $soundMatches = [regex]::Matches($ascii, '[\x20-\x7E]{6,}') | Where-Object { 
-            $_.Value -match 'SoundTask|SoundUrl|soundUrl|mediaUrl|loadSound|playSound' 
-          } | Select-Object -ExpandProperty Value -Unique | Sort-Object
-          $soundMatches | Select-Object -First 20
-          
-          Write-Host "=== .sol file hexdump ==="
-          $solPath = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store\#SharedObjects\CORE5.sol"
-          if (Test-Path $solPath) {
-            $solBytes = [System.IO.File]::ReadAllBytes($solPath)
-            Write-Host "Size: $($solBytes.Length) bytes"
-            # Print as hex
-            $hex = ($solBytes | ForEach-Object { $_.ToString("X2") }) -join ' '
-            Write-Host $hex
-            # Also print as ASCII where possible
-            $asciiSol = [System.Text.Encoding]::ASCII.GetString($solBytes) -replace '[^\x20-\x7E]', '.'
-            Write-Host "ASCII: $asciiSol"
+          # Decompress SWF if needed
+          $swfContent = $null
+          if ($header -eq "CWS") {
+            Write-Host "Decompressing zlib SWF..."
+            $ms = New-Object System.IO.MemoryStream
+            $ms.Write($bytes, 8, $bytes.Length - 8)
+            $ms.Position = 0
+            $deflate = New-Object System.IO.Compression.DeflateStream($ms, [System.IO.Compression.CompressionMode]::Decompress)
+            $reader = New-Object System.IO.StreamReader($deflate)
+            $swfContent = $reader.ReadToEnd()
+            Write-Host "Decompressed size: $($swfContent.Length) chars"
+          } elseif ($header -eq "FWS") {
+            $swfContent = [System.Text.Encoding]::ASCII.GetString($bytes)
           } else {
-            Write-Host ".sol file not found at: $solPath"
-            # Search for any .sol files
-            Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Select-Object FullName, Length
+            Write-Host "Unknown format, trying raw..."
+            $swfContent = [System.Text.Encoding]::ASCII.GetString($bytes)
           }
           
-          Write-Host "=== All .sol files ==="
-          Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+          if ($swfContent) {
+            Write-Host "=== Content/path/asset strings ==="
+            $matches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
+              $_.Value -match 'contentPath|assetPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|assetBase|mediaUrl|audioPath|soundPath|contentDir|assets_a|audio_us|xml_us' 
+            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
+            $matches | Select-Object -First 40
+            
+            Write-Host "=== Sound/SoundTask strings ==="
+            $soundMatches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
+              $_.Value -match 'SoundTask|soundUrl|mediaUrl|loadSound|playSound|SoundChannel|onMediaError' 
+            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
+            $soundMatches | Select-Object -First 30
+            
+            Write-Host "=== applicationDirectory/storageDirectory strings ==="
+            $dirMatches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
+              $_.Value -match 'applicationDirectory|applicationStorageDirectory|resolvePath|File::|app:/|app-storage:/' 
+            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
+            $dirMatches | Select-Object -First 30
+            
+            Write-Host "=== URL/path construction strings ==="
+            $urlMatches = [regex]::Matches($swfContent, '[\x20-\x7E]{6,}') | Where-Object { 
+              $_.Value -match 'URLRequest|file:///|https://|assets/|/audio/|/xml/' 
+            } | Select-Object -ExpandProperty Value -Unique | Sort-Object
+            $urlMatches | Select-Object -First 30
+          }
 
       - name: Setup hosts redirect and proxy
         shell: pwsh
