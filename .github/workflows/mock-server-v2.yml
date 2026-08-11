@@ -147,7 +147,7 @@ jobs:
           $swf = "$lexiaDir\PortalDesktop.swf"
           
           # Download JPEXS Flash Decompiler
-          $ffdecUrl = "https://github.com/jindra1602/JPEXS-Flash-Decompiler/releases/download/version22.0.2/ffdec_22.0.2.zip"
+          $ffdecUrl = "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version26.2.1/ffdec_26.2.1.zip"
           Write-Host "Downloading JPEXS Flash Decompiler..."
           Invoke-WebRequest -Uri $ffdecUrl -OutFile "C:\ffdec.zip" -MaximumRedirection 5
           Expand-Archive -Path "C:\ffdec.zip" -DestinationPath "C:\ffdec" -Force
