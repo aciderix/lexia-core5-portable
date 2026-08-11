@@ -98,9 +98,6 @@ jobs:
             }
             if ($modified) { Set-Content $_.FullName -Value $fcontent -NoNewline }
           }
-          
-          Write-Host "=== Services directory ==="
-          Get-ChildItem "C:\amfphp\Amfphp\Services" | ForEach-Object { Write-Host "  $($_.Name)" }
 
       - name: Setup hosts redirect and proxy
         shell: pwsh
@@ -119,7 +116,6 @@ jobs:
           Write-Host "Hosts file updated"
           Copy-Item "scripts/proxy.py" "C:\proxy.py" -Force
           Copy-Item "scripts/CORE5.sol" "C:\CORE5.sol" -Force
-          Write-Host "Proxy and SOL file copied"
 
       - name: Run mock server and app
         shell: pwsh
@@ -174,7 +170,6 @@ jobs:
           Write-Host "=== Placing AMF0 .sol file ==="
           $soDirs = Get-ChildItem -Path "$env:APPDATA" -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
           foreach ($soDir in $soDirs) {
-            Write-Host "Found: $($soDir.FullName)"
             if ($soDir.FullName -match "com\.lexiareading") {
               $solDest = Join-Path $soDir.FullName "CORE5.sol"
               Copy-Item "C:\CORE5.sol" $solDest -Force
@@ -183,7 +178,6 @@ jobs:
               if (Test-Path $swfDir) {
                 $solDest2 = Join-Path $swfDir "CORE5.sol"
                 Copy-Item "C:\CORE5.sol" $solDest2 -Force
-                Write-Host "  Placed CORE5.sol at: $solDest2"
               }
             }
           }
@@ -197,7 +191,6 @@ jobs:
           
           $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
           if ($p -and $p.MainWindowHandle -ne 0) {
-            Write-Host "Process alive! Handle: $($p.MainWindowHandle)"
             $sw::ShowWindow($p.MainWindowHandle, 3) | Out-Null
             Start-Sleep -Milliseconds 500
             $fg::SetForegroundWindow($p.MainWindowHandle) | Out-Null
@@ -222,7 +215,6 @@ jobs:
             [WinRect]::GetWindowRect($p2.MainWindowHandle, [ref]$rect) | Out-Null
             $winLeft = $rect.Left
             $winTop = $rect.Top
-            Write-Host "Window rect: L=$($rect.Left) T=$($rect.Top) R=$($rect.Right) B=$($rect.Bottom)"
           }
 
           function ClickAt($relX, $relY, $label) {
@@ -252,7 +244,7 @@ jobs:
           TakeScreenshot "01-initial.png"
 
           # ============================================================
-          # STEP 5: Activate Student/Parent flow (TAB+SPACE via keybd_event)
+          # STEP 5: Student/Parent -> email -> congrats -> login
           # ============================================================
           Write-Host "=== Tab+Space to activate Student/Parent ==="
           $fg::SetForegroundWindow($p2.MainWindowHandle) | Out-Null
@@ -261,84 +253,83 @@ jobs:
           Start-Sleep -Milliseconds 500
           PressKey 32  # SPACE
           Start-Sleep -Seconds 5
-          TakeScreenshot "02-after-tab-space.png"
 
-          # ============================================================
-          # STEP 6: Enter teacher email, submit with hardware ENTER
-          # ============================================================
           Write-Host "=== Entering teacher email ==="
           ClickAt 529 364 "Email field"
           Start-Sleep -Milliseconds 500
           TypeText "teacher@school.edu"
           Start-Sleep -Milliseconds 500
-          TakeScreenshot "03-email-typed.png"
+          TakeScreenshot "02-email-typed.png"
 
-          Write-Host "=== Submitting email with hardware ENTER ==="
-          PressKey 13  # ENTER (hardware-level, this is what worked in run #38)
+          Write-Host "=== Submitting email (hardware ENTER) ==="
+          PressKey 13  # ENTER
           Start-Sleep -Seconds 6
-          TakeScreenshot "04-after-email-enter.png"
+          TakeScreenshot "03-after-email-enter.png"
 
-          # ============================================================
-          # STEP 7: "Congratulations" confirmation screen -> ENTER to advance
-          # ============================================================
           Write-Host "=== Advancing past Congratulations screen ==="
           PressKey 13  # ENTER
           Start-Sleep -Seconds 6
-          TakeScreenshot "05-after-congrats-enter.png"
-
-          # Backup: also click where the arrow/continue button typically sits
-          # (in case the Congratulations screen needs a click, not Enter)
-          ClickAt 512 502 "Congrats continue button (guess)"
-          Start-Sleep -Seconds 3
-          TakeScreenshot "06-after-congrats-click.png"
+          TakeScreenshot "04-login-screen.png"
 
           # ============================================================
-          # STEP 8: Student login screen (Portable Site) - enter credentials
-          # Coordinates confirmed from user screenshot (1024x768 window):
-          #   Username field center: (530, 382)
-          #   Password field center: (530, 427)
-          #   Circular arrow submit button center: (512, 502)
+          # STEP 6: Enter student credentials
           # ============================================================
           Write-Host "=== Entering student credentials ==="
-          TakeScreenshot "07-login-screen.png"
-
           ClickAt 530 382 "Username field"
           Start-Sleep -Milliseconds 500
           TypeText "student"
           Start-Sleep -Milliseconds 500
-          TakeScreenshot "08-username-entered.png"
 
           ClickAt 530 427 "Password field"
           Start-Sleep -Milliseconds 500
           TypeText "password"
           Start-Sleep -Milliseconds 500
-          TakeScreenshot "09-password-entered.png"
+          TakeScreenshot "05-credentials-entered.png"
 
-          Write-Host "=== Clicking arrow submit button ==="
+          Write-Host "=== Clicking login button ==="
           ClickAt 512 502 "Arrow submit button"
-          Start-Sleep -Seconds 6
-          TakeScreenshot "10-after-submit-click.png"
-
-          # Backup: hardware ENTER in case click missed
-          PressKey 13
           Start-Sleep -Seconds 8
-          TakeScreenshot "11-after-submit-enter.png"
+          TakeScreenshot "06-after-login.png"
 
-          # Wait for app to progress (login() call + UI transition)
-          for ($i = 12; $i -le 22; $i++) {
+          # Wait for app to load (login + level selection screen)
+          Write-Host "=== Waiting for level selection screen ==="
+          for ($i = 7; $i -le 12; $i++) {
+            Start-Sleep -Seconds 5
+            TakeScreenshot ("{0:D2}-loading.png" -f $i)
+          }
+
+          # ============================================================
+          # STEP 7: Click on first level (green button at ~458,394)
+          # ============================================================
+          Write-Host "=== Clicking first level button ==="
+          TakeScreenshot "13-level-screen.png"
+          
+          # Try the first green level button (center ~458,394)
+          ClickAt 458 394 "Level 1 button (green)"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "14-after-level-click.png"
+          
+          # Also try the second green button (center ~631,445)
+          ClickAt 631 445 "Level 2 button (green)"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "15-after-level2-click.png"
+          
+          # Try the small green circle (center ~246,349)
+          ClickAt 246 349 "Small green circle"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "16-after-small-green.png"
+          
+          # Wait and capture progress
+          for ($i = 17; $i -le 25; $i++) {
             Start-Sleep -Seconds 5
             TakeScreenshot ("{0:D2}-progress.png" -f $i)
           }
 
           # ============================================================
-          # STEP 9: Collect logs
+          # STEP 8: Collect logs
           # ============================================================
-          Write-Host "=== Proxy stdout ==="
-          if (Test-Path C:\proxy-stdout.txt) { Get-Content C:\proxy-stdout.txt }
-          Write-Host "=== PHP stdout ==="
-          if (Test-Path C:\php-stdout.txt) { Get-Content C:\php-stdout.txt }
           Write-Host "=== AMF Log ==="
-          if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No proxy log" }
+          if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt }
           Write-Host "=== Processes ==="
           Get-Process -Name "python","php","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
@@ -346,20 +337,9 @@ jobs:
           $found = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
           if ($found) {
             foreach ($f in $found) {
-              Write-Host "Found: $($f.FullName)"
               Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
             }
             Get-Content $found[0].FullName
-          }
-
-          Write-Host "=== All .sol files ==="
-          $allSO = Get-ChildItem -Path "$env:APPDATA","$env:LOCALAPPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue
-          if ($allSO) {
-            foreach ($so in $allSO) {
-              Write-Host "  $($so.FullName) ($($so.Length) bytes)"
-              $destName = "sol_" + [System.IO.Path]::GetFileName($so.Directory.Name) + "_" + $so.Name
-              Copy-Item $so.FullName "screenshots\$destName" -Force
-            }
           }
 
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -384,7 +364,7 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-      - name: Upload screenshots and app logs
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
