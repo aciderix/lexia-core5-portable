@@ -140,90 +140,103 @@ jobs:
             Get-Content $xmlFile | Select-Object -First 80
           }
 
-      - name: Read AIR config and content XML
+      - name: Decompile SWF with JPEXS Flash Decompiler
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
-          
-          Write-Host "=== AIR application.xml ==="
-          $appXml = "$lexiaDir\META-INF\AIR\application.xml"
-          if (Test-Path $appXml) {
-            Get-Content $appXml
-          }
-          
-          Write-Host "=== us_a.xml (content config) - first 100 lines ==="
-          $usXml = "$lexiaDir\assets_a\us_a.xml"
-          if (Test-Path $usXml) {
-            Get-Content $usXml | Select-Object -First 100
-          }
-          
-          Write-Host "=== Search us_a.xml for audio/sound/media ==="
-          if (Test-Path $usXml) {
-            $content = Get-Content $usXml -Raw
-            $content | Select-String -Pattern 'audio|sound|media|mp3|path|dir|base|url' -AllMatches | Select-Object -First 20
-          }
-          
-          Write-Host "=== Full PortalDesktop.log ==="
-          $logPath = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store\#SharedObjects\PortalDesktop.swf\CORE5.sol"
-          # Check for log files
-          $logFiles = Get-ChildItem "$env:APPDATA\com.lexiareading.core5.desktop.us" -Recurse -ErrorAction SilentlyContinue
-          $logFiles | Select-Object FullName, Length | Format-Table -AutoSize
-          
-          Write-Host "=== Python SWF string extraction ==="
-          # Install Python and use it to decompress SWF and extract strings
           $swf = "$lexiaDir\PortalDesktop.swf"
-          $pyScript = @'
-          import zlib, re, sys
-          with open(sys.argv[1], "rb") as f:
-              data = f.read()
-          header = data[:3]
-          print(f"SWF header: {header}")
-          if header == b"CWS":
-              # CWS: first 8 bytes are header, rest is zlib compressed
-              try:
-                  decompressed = zlib.decompress(data[8:])
-                  print(f"Decompressed: {len(decompressed)} bytes")
-              except:
-                  # Try skipping just 2 bytes after CWS + version + length
-                  try:
-                      decompressed = zlib.decompress(data[8:])
-                      print(f"Decompressed alt: {len(decompressed)} bytes")
-                  except Exception as e:
-                      print(f"Decompress error: {e}")
-                      # Try raw inflate
-                      import io
-                      decomp_obj = zlib.decompressobj()
-                      decompressed = decomp_obj.decompress(data[8:])
-                      print(f"Decompressed (raw): {len(decompressed)} bytes")
-          elif header == b"FWS":
-              decompressed = data
-          else:
-              print(f"Unknown header: {header}")
-              sys.exit(1)
           
-          # Extract all ASCII strings >= 6 chars
-          strings = re.findall(rb"[\x20-\x7e]{6,}", decompressed)
-          # Filter for relevant keywords
-          keywords = [b"content", b"asset", b"audio", b"sound", b"path", b"url", b"media",
-                      b"base", b"dir", b"cdn", b"resolve", b"File", b"app:/", b"app-storage",
-                      b"URLRequest", b"loadSound", b"SoundTask", b"onMediaError", b"mp3"]
-          found = set()
-          for s in strings:
-              for kw in keywords:
-                  if kw.lower() in s.lower():
-                      found.add(s.decode("ascii", errors="replace"))
+          # Download JPEXS Flash Decompiler
+          $ffdecUrl = "https://github.com/jindra1602/JPEXS-Flash-Decompiler/releases/download/version22.0.2/ffdec_22.0.2.zip"
+          Write-Host "Downloading JPEXS Flash Decompiler..."
+          Invoke-WebRequest -Uri $ffdecUrl -OutFile "C:\ffdec.zip" -MaximumRedirection 5
+          Expand-Archive -Path "C:\ffdec.zip" -DestinationPath "C:\ffdec" -Force
+          $ffdecJar = Get-ChildItem "C:\ffdec" -Filter "ffdec.jar" -Recurse | Select-Object -First 1
+          Write-Host "FFDEC jar: $($ffdecJar.FullName)"
           
-          print(f"\n=== Found {len(found)} matching strings ===")
-          for s in sorted(found)[:80]:
-              print(s)
-          '@
-          $pyScript | Out-File -FilePath "C:\swf_extract.py" -Encoding utf8
-          python C:\swf_extract.py "$swf" 2>&1
+          # Check if Java is available
+          $java = Get-Command java -ErrorAction SilentlyContinue
+          if (-not $java) {
+            Write-Host "Java not found, installing..."
+            choco install openjdk17 -y --no-progress 2>$null
+            $env:JAVA_HOME = "C:\Program Files\OpenJDK\openjdk-17"
+            $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+          }
+          java -version 2>&1
           
-          Write-Host "=== .sol files search ==="
-          Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
-          Get-ChildItem "C:\Users" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue -Depth 5 | Select-Object FullName, Length | Format-Table -AutoSize
-
+          # Decompile the SWF - export ActionScript source
+          Write-Host "Decompiling SWF..."
+          $exportDir = "C:\swf_decompiled"
+          New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
+          
+          # Export all ActionScript code
+          & java -jar $ffdecJar.FullName -export script $exportDir $swf 2>&1 | Select-Object -First 20
+          
+          Write-Host "=== Searching for CONTENT_URL usage ==="
+          $scripts = Get-ChildItem $exportDir -Recurse -Filter "*.as" -ErrorAction SilentlyContinue
+          Write-Host "Found $($scripts.Count) ActionScript files"
+          
+          foreach ($f in $scripts) {
+            $c = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
+            if ($c -match 'CONTENT_URL|contentUrl|contentURL') {
+              Write-Host "=== FOUND in: $($f.FullName) ==="
+              $lines = Get-Content $f.FullName
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match 'CONTENT_URL|contentUrl|contentURL') {
+                  $start = [Math]::Max(0, $i - 5)
+                  $end = [Math]::Min($lines.Count - 1, $i + 10)
+                  Write-Host "  Lines $start-$end:"
+                  for ($j = $start; $j -le $end; $j++) {
+                    Write-Host "    $j: $($lines[$j])"
+                  }
+                }
+              }
+            }
+          }
+          
+          Write-Host "=== Searching for SoundTask ==="
+          foreach ($f in $scripts) {
+            $c = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
+            if ($c -match 'SoundTask') {
+              Write-Host "=== FOUND SoundTask in: $($f.FullName) ==="
+              $lines = Get-Content $f.FullName
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match 'SoundTask') {
+                  $start = [Math]::Max(0, $i - 3)
+                  $end = [Math]::Min($lines.Count - 1, $i + 15)
+                  Write-Host "  Lines $start-$end:"
+                  for ($j = $start; $j -le $end; $j++) {
+                    Write-Host "    $($lines[$j])"
+                  }
+                }
+              }
+            }
+          }
+          
+          Write-Host "=== Searching for asset/content path construction ==="
+          foreach ($f in $scripts) {
+            $c = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
+            if ($c -match 'ASSET_MANIFEST|AssetManifest|getContentUrl|contentBase|assetBase|contentRoot|assetRoot') {
+              Write-Host "=== FOUND in: $($f.FullName) ==="
+              $lines = Get-Content $f.FullName
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match 'ASSET_MANIFEST|AssetManifest|getContentUrl|contentBase|assetBase|contentRoot|assetRoot') {
+                  $start = [Math]::Max(0, $i - 3)
+                  $end = [Math]::Min($lines.Count - 1, $i + 10)
+                  for ($j = $start; $j -le $end; $j++) {
+                    Write-Host "    $($lines[$j])"
+                  }
+                }
+              }
+            }
+          }
+          
+          Write-Host "=== Exercise XML full content ==="
+          $xmlFile = "$lexiaDir\assets_a\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
+          if (Test-Path $xmlFile) {
+            Get-Content $xmlFile
+          }
+          
       - name: Setup hosts redirect and proxy
         shell: pwsh
         run: |
