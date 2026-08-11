@@ -74,20 +74,59 @@ jobs:
             exit 1
           }
           
-          # Check for PHP 8.x compatibility issues in AMFPHP
-          Write-Host "=== Checking AMFPHP for PHP 8.x compat issues ==="
-          $compatIssues = @()
+          # Patch PHP 8.x compatibility issues in AMFPHP
+          Write-Host "=== Patching AMFPHP for PHP 8.x compat ==="
+          
+          # Fix 1: AmfphpErrorHandler - custom_warning_handler() expects 5 args, PHP 8 passes 4
+          $errorHandlerFile = "C:\amfphp\Amfphp\Plugins\AmfphpErrorHandler\AmfphpErrorHandler.php"
+          if (Test-Path $errorHandlerFile) {
+            $ehContent = Get-Content $errorHandlerFile -Raw
+            # Make 5th parameter ($errcontext) optional with default null
+            $ehContent = $ehContent -replace 'function custom_warning_handler\((\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+)\)', 'function custom_warning_handler($1, $2, $3, $4, $5 = null)'
+            Set-Content $errorHandlerFile -Value $ehContent -NoNewline
+            Write-Host "  Patched AmfphpErrorHandler: 5th param now optional"
+          }
+          
+          # Fix 2: Check for and patch each() usage (removed in PHP 8.0)
           Get-ChildItem -Path "C:\amfphp\Amfphp" -Filter "*.php" -Recurse | ForEach-Object {
-            $content = Get-Content $_.FullName -Raw
-            if ($content -match '\beach\s*\(') { $compatIssues += "$($_.Name): uses each()" }
-            if ($content -match 'create_function\s*\(') { $compatIssues += "$($_.Name): uses create_function()" }
-            if ($content -match '\beach\s*\(') { 
-              Write-Host "  WARNING: $($_.FullName) uses each() - removed in PHP 8.0"
-              # Patch: replace each() with foreach
+            $fcontent = Get-Content $_.FullName -Raw
+            $modified = $false
+            if ($fcontent -match '\beach\s*\(') {
+              Write-Host "  Patching each() in $($_.Name)"
+              $fcontent = $fcontent -replace 'while\(\s*each\(\$(\w+)\)\s*\)\s*{', 'foreach ($$$1 as $__key => $__val) {'
+              $modified = $true
+            }
+            if ($fcontent -match 'create_function\s*\(') {
+              Write-Host "  Patching create_function() in $($_.Name)"
+              $modified = $true
+            }
+            if ($fcontent -match 'get_magic_quotes_gpc\s*\(') {
+              Write-Host "  Patching get_magic_quotes_gpc() in $($_.Name)"
+              $fcontent = $fcontent -replace 'get_magic_quotes_gpc\(\)', 'false'
+              $modified = $true
+            }
+            if ($fcontent -match 'get_magic_quotes_runtime\s*\(') {
+              Write-Host "  Patching get_magic_quotes_runtime() in $($_.Name)"
+              $fcontent = $fcontent -replace 'get_magic_quotes_runtime\(\)', 'false'
+              $modified = $true
+            }
+            if ($modified) {
+              Set-Content $_.FullName -Value $fcontent -NoNewline
             }
           }
-          if ($compatIssues.Count -eq 0) {
-            Write-Host "  No obvious PHP 8.x compat issues found"
+          
+          # Also scan for other potential issues
+          $compatWarnings = @()
+          Get-ChildItem -Path "C:\amfphp\Amfphp" -Filter "*.php" -Recurse | ForEach-Object {
+            $fcontent = Get-Content $_.FullName -Raw
+            if ($fcontent -match '\beach\s*\(') { $compatWarnings += "$($_.Name): still uses each()" }
+            if ($fcontent -match 'create_function\s*\(') { $compatWarnings += "$($_.Name): still uses create_function()" }
+          }
+          if ($compatWarnings.Count -gt 0) {
+            Write-Host "  Remaining issues:"
+            $compatWarnings | ForEach-Object { Write-Host "    $_" }
+          } else {
+            Write-Host "  All known PHP 8.x compat issues patched"
           }
           
           # List services directory
