@@ -351,7 +351,10 @@ def build_generic_vo():
     })
 
 def build_response(response_uri, amf3_value, version=3):
-    """Build AMF response packet (version 3, pure AMF3 array body)."""
+    """Build AMF response packet.
+    Body data = direct AMF3 value (no array wrapper).
+    This is what the Flex framework expects - a single AcknowledgeMessage, not an array.
+    """
     packet = struct.pack(">H", version)
     packet += struct.pack(">H", 0)       # 0 headers
     packet += struct.pack(">H", 1)       # 1 body
@@ -361,7 +364,8 @@ def build_response(response_uri, amf3_value, version=3):
     packet += struct.pack(">H", len(target_bytes)) + target_bytes
     packet += struct.pack(">H", 0)  # empty response URI
     
-    body_data = enc_array([amf3_value])
+    # Send the AMF3 value directly as body data (NOT wrapped in an array)
+    body_data = amf3_value
     packet += struct.pack(">I", len(body_data))
     packet += body_data
     
