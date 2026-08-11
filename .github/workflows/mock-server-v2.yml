@@ -38,11 +38,94 @@ jobs:
           Write-Host "Installer exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
 
-      - name: Setup hosts redirect and mock server
+      - name: Setup PHP and AMFPHP
         shell: pwsh
         run: |
-          Copy-Item "scripts/amf_server_https.py" "C:\amf_server.py"
+          # Check if PHP is already available
+          $php = Get-Command php -ErrorAction SilentlyContinue
+          if ($php) {
+            Write-Host "PHP already available: $($php.Source)"
+            $phpVersion = & php -v 2>&1 | Select-Object -First 1
+            Write-Host "PHP version: $phpVersion"
+          } else {
+            Write-Host "Installing PHP via chocolatey..."
+            choco install php --no-progress -y
+            Refresh-Env
+            $php = Get-Command php -ErrorAction SilentlyContinue
+            if ($php) {
+              Write-Host "PHP installed: $($php.Source)"
+            } else {
+              Write-Host "ERROR: PHP installation failed!"
+              exit 1
+            }
+          }
           
+          # Download AMFPHP 2.2 from GitHub
+          Write-Host "Downloading AMFPHP 2.x..."
+          $amfphpUrl = "https://github.com/silexlabs/amfphp-2.0/archive/refs/heads/master.zip"
+          try {
+            Invoke-WebRequest -Uri $amfphpUrl -OutFile "amfphp.zip" -ErrorAction Stop
+          } catch {
+            Write-Host "Failed to download from GitHub, trying alternative..."
+            # Try the releases page
+            $amfphpUrl = "https://github.com/silexlabs/amfphp-2.0/archive/refs/tags/2.2.zip"
+            Invoke-WebRequest -Uri $amfphpUrl -OutFile "amfphp.zip"
+          }
+          
+          Expand-Archive -Path "amfphp.zip" -DestinationPath "C:\amfphp-src" -Force
+          Write-Host "Extracted AMFPHP source"
+          
+          # Find the extracted directory
+          $amfphpDir = Get-ChildItem -Path "C:\amfphp-src" -Directory | Select-Object -First 1
+          Write-Host "AMFPHP directory: $($amfphpDir.FullName)"
+          
+          # Set up the server directory
+          New-Item -ItemType Directory -Force -Path "C:\amfphp" | Out-Null
+          Copy-Item -Path "$($amfphpDir.FullName)\*" -Destination "C:\amfphp" -Recurse -Force
+          
+          # List the structure
+          Write-Host "=== AMFPHP structure ==="
+          Get-ChildItem -Path "C:\amfphp" -Recurse -Depth 2 | Select-Object FullName | ForEach-Object { Write-Host $_.FullName }
+          
+          # Copy our AMFClient service
+          $servicesDir = "C:\amfphp\Amfphp\Services"
+          if (-not (Test-Path $servicesDir)) {
+            # Try alternate path
+            $servicesDir = "C:\amfphp\Services"
+          }
+          if (-not (Test-Path $servicesDir)) {
+            # Create it
+            $servicesDir = "C:\amfphp\Amfphp\Services"
+            New-Item -ItemType Directory -Force -Path $servicesDir | Out-Null
+          }
+          Write-Host "Services directory: $servicesDir"
+          Copy-Item "scripts/AMFClient.php" -Destination "$servicesDir\AMFClient.php" -Force
+          Write-Host "AMFClient.php copied to services"
+          
+          # Check if index.php exists (the AMFPHP gateway)
+          $indexFile = "C:\amfphp\index.php"
+          if (-not (Test-Path $indexFile)) {
+            # Search for it
+            $found = Get-ChildItem -Path "C:\amfphp" -Filter "index.php" -Recurse
+            if ($found) {
+              $indexFile = $found[0].FullName
+              Write-Host "Found index.php at: $indexFile"
+            } else {
+              Write-Host "WARNING: No index.php found - will need to create one"
+            }
+          } else {
+            Write-Host "index.php found at: $indexFile"
+          }
+          
+          # Show the contents of index.php for debugging
+          if (Test-Path $indexFile) {
+            Write-Host "=== index.php contents ==="
+            Get-Content $indexFile
+          }
+
+      - name: Setup hosts redirect
+        shell: pwsh
+        run: |
           $hostsFile = "C:\Windows\System32\drivers\etc\hosts"
           $entries = @(
             "127.0.0.1 student.mylexia.com",
@@ -57,6 +140,9 @@ jobs:
             Add-Content -Path $hostsFile -Value $entry
           }
           Write-Host "Hosts file updated"
+          
+          # Copy proxy script
+          Copy-Item "scripts/proxy.py" "C:\proxy.py" -Force
 
       - name: Run mock server and app
         shell: pwsh
@@ -69,17 +155,39 @@ jobs:
           $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
           $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
 
-          Write-Host "Starting mock HTTPS AMF server..."
-          $serverJob = Start-Job -ScriptBlock { python C:\amf_server.py 2>&1 | Out-File C:\amf-stdout.txt -Encoding UTF8 }
-          Start-Sleep -Seconds 8
-
-          Write-Host "=== Server job state ==="
-          Write-Host "Job status: $($serverJob.State)"
-          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
+          # Start PHP built-in server (AMFPHP gateway)
+          Write-Host "Starting PHP server on port 8080..."
+          $phpJob = Start-Job -ScriptBlock {
+            Set-Location C:\amfphp
+            php -S 127.0.0.1:8080 -t C:\amfphp 2>&1 | Out-File C:\php-stdout.txt -Encoding UTF8
+          }
+          Start-Sleep -Seconds 3
           
-          Write-Host "=== netstat 443 ==="
-          netstat -an | Select-String ":443 "
+          # Test PHP server
+          Write-Host "Testing PHP server..."
+          try {
+            $testResp = Invoke-WebRequest -Uri "http://127.0.0.1:8080/" -UseBasicParsing -TimeoutSec 5
+            Write-Host "PHP server responded: $($testResp.StatusCode)"
+          } catch {
+            Write-Host "PHP server test failed: $_"
+            # Check job output
+            if (Test-Path C:\php-stdout.txt) { Get-Content C:\php-stdout.txt }
+          }
 
+          # Start Python HTTPS proxy
+          Write-Host "Starting HTTPS proxy on port 443..."
+          $proxyJob = Start-Job -ScriptBlock { python C:\proxy.py 2>&1 | Out-File C:\proxy-stdout.txt -Encoding UTF8 }
+          Start-Sleep -Seconds 5
+          
+          Write-Host "=== Proxy job state ==="
+          Write-Host "Job status: $($proxyJob.State)"
+          if (Test-Path C:\proxy-stdout.txt) { Get-Content C:\proxy-stdout.txt }
+          
+          Write-Host "=== netstat ==="
+          netstat -an | Select-String ":443 "
+          netstat -an | Select-String ":8080 "
+
+          # Launch app
           Write-Host "Launching LexiaCore5..."
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
           $proc = Start-Process -FilePath $exe -PassThru
@@ -100,76 +208,69 @@ jobs:
             Write-Host "Process not found!"
           }
 
+          # Screenshots
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
           $bounds = $screen.Bounds
-          $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save("screenshots\01-initial.png")
-          $g.Dispose(); $bmp.Dispose()
-
-          for ($i = 2; $i -le 10; $i++) {
-            Start-Sleep -Seconds 5
+          
+          function TakeScreenshot($name) {
             $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-            $bmp.Save("screenshots\{0:D2}-delayed.png" -f $i)
+            $bmp.Save("screenshots\$name")
             $g.Dispose(); $bmp.Dispose()
+          }
+          
+          TakeScreenshot "01-initial.png"
+
+          for ($i = 2; $i -le 10; $i++) {
+            Start-Sleep -Seconds 5
+            TakeScreenshot "{0:D2}-delayed.png" -f $i
           }
 
           # Results
-          Write-Host "=== AMF Server stdout ==="
-          if (Test-Path C:\amf-stdout.txt) { Get-Content C:\amf-stdout.txt }
-          Write-Host "=== AMF Log ==="
-          if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No AMF log" }
+          Write-Host "=== Proxy stdout ==="
+          if (Test-Path C:\proxy-stdout.txt) { Get-Content C:\proxy-stdout.txt }
+          Write-Host "=== PHP stdout ==="
+          if (Test-Path C:\php-stdout.txt) { Get-Content C:\php-stdout.txt }
+          Write-Host "=== AMF/Proxy Log ==="
+          if (Test-Path C:\amf-log.txt) { Get-Content C:\amf-log.txt } else { Write-Host "No proxy log" }
           Write-Host "=== netstat ==="
-          netstat -an | Select-String ":443 "
+          netstat -an | Select-String ":443 "," :8080 "
           Write-Host "=== Processes ==="
-          Get-Process -Name "python","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
+          Get-Process -Name "python","php","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
           # Find and copy PortalDesktop.log (AIR app log)
           Write-Host "=== Searching for PortalDesktop.log ==="
-          $logPaths = @(
-            "$env:APPDATA\LexiaCore5\PortalDesktop.log",
-            "$env:LOCALAPPDATA\LexiaCore5\PortalDesktop.log",
-            "$env:APPDATA\LexiaCore5\Adobe\AIR\ELS\PortalDesktop.log"
-          )
-          # Also search recursively in AppData
           $found = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
           if ($found) {
             foreach ($f in $found) {
               Write-Host "Found log at: $($f.FullName)"
               Copy-Item $f.FullName "C:\PortalDesktop.log" -Force
-              # Also copy to screenshots dir for upload
               Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
             }
+            # Print its contents!
+            Write-Host "=== PortalDesktop.log contents ==="
+            Get-Content "C:\PortalDesktop.log"
           } else {
-            Write-Host "PortalDesktop.log not found, searching broader..."
+            Write-Host "PortalDesktop.log not found"
             $found2 = Get-ChildItem -Path "C:\Users" -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
             if ($found2) {
               foreach ($f in $found2) {
-                Write-Host "Found log at: $($f.FullName)"
+                Write-Host "Found: $($f.FullName)"
                 Copy-Item $f.FullName "C:\PortalDesktop.log" -Force
                 Copy-Item $f.FullName "screenshots\PortalDesktop.log" -Force
               }
-            } else {
-              Write-Host "PortalDesktop.log NOT FOUND anywhere"
-            }
-          }
-
-          # Also look for any AIR debug logs
-          $airLogs = Get-ChildItem -Path $env:APPDATA -Filter "*.log" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "lexia|Lexia" }
-          if ($airLogs) {
-            foreach ($f in $airLogs) {
-              Write-Host "AIR log: $($f.FullName)"
-              Copy-Item $f.FullName "screenshots\$(Split-Path $f.FullName -Leaf)" -Force
+              Write-Host "=== PortalDesktop.log contents ==="
+              Get-Content "C:\PortalDesktop.log"
             }
           }
 
           # Cleanup
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
-          Stop-Job $serverJob -ErrorAction SilentlyContinue
-          Remove-Job $serverJob -ErrorAction SilentlyContinue
+          Stop-Job $phpJob -ErrorAction SilentlyContinue
+          Stop-Job $proxyJob -ErrorAction SilentlyContinue
+          Remove-Job $phpJob -ErrorAction SilentlyContinue
+          Remove-Job $proxyJob -ErrorAction SilentlyContinue
           '
           
           $code | Out-File -FilePath "C:\interact.ps1" -Encoding UTF8
@@ -182,7 +283,8 @@ jobs:
           name: amf-logs
           path: |
             C:\amf-log.txt
-            C:\amf-stdout.txt
+            C:\proxy-stdout.txt
+            C:\php-stdout.txt
             C:\PortalDesktop.log
           retention-days: 30
           if-no-files-found: ignore
