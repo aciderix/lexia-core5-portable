@@ -349,7 +349,7 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
         req_path = urllib.parse.unquote(parsed.path)
         clean_path = req_path[1:] if req_path.startswith('/') else req_path
         
-        if req_path in ('/crossdomain.xml', 'crossdomain.xml'):
+        if req_path.endswith('crossdomain.xml'):
             crossdomain = (
                 b'<?xml version="1.0"?>\n'
                 b'<!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd">\n'
@@ -362,6 +362,8 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/x-cross-domain-policy')
             self.send_header('Content-Length', str(len(crossdomain)))
             self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Headers', '*')
+            self.send_header('Access-Control-Allow-Credentials', 'true')
             self.end_headers()
             self.wfile.write(crossdomain)
             return

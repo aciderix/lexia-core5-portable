@@ -130,13 +130,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         req_path = urllib.parse.unquote(parsed.path)
         
-        # Flash crossdomain.xml request
-        if req_path in ('/crossdomain.xml', 'crossdomain.xml'):
-            log("  Serving crossdomain.xml for Flash Security Policy")
+        # Flash crossdomain.xml request (matches /crossdomain.xml, /assets_a/crossdomain.xml, etc.)
+        if req_path.endswith('crossdomain.xml'):
+            log(f"  Serving crossdomain.xml for Flash Security Policy ({req_path})")
             self.send_response(200)
             self.send_header('Content-Type', 'text/x-cross-domain-policy')
             self.send_header('Content-Length', str(len(CROSSDOMAIN_XML)))
             self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Headers', '*')
+            self.send_header('Access-Control-Allow-Credentials', 'true')
             self.end_headers()
             if not head_only:
                 self.wfile.write(CROSSDOMAIN_XML)
