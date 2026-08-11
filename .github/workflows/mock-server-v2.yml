@@ -236,56 +236,62 @@ jobs:
             Get-Content $_.FullName | ForEach-Object { Write-Host $_ }
           }
           
-      - name: Fix content paths and dump AssetManifest
+      - name: Fix content paths and exercise XML
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
+          $assetsDir = "$lexiaDir\assets_a"
           
           # APPROACH 1: Create directory junctions from assets_a/* to parent
-          # So contentURL=app:/ resolves to app:/audio_us/... instead of app:/assets_a/audio_us/...
           Write-Host "=== Creating directory junctions ==="
-          $assetsDir = "$lexiaDir\assets_a"
           Get-ChildItem $assetsDir -Directory | ForEach-Object {
             $target = Join-Path $lexiaDir $_.Name
             if (-not (Test-Path $target)) {
-              cmd /c mklink /J "$target" "$($_.FullName)" 2>&1
-              Write-Host "  Created junction: $target -> $($_.FullName)"
-            } else {
-              Write-Host "  Already exists: $target"
+              cmd /c mklink /J "$target" "$($_.FullName)" 2>&1 | Out-Null
+              Write-Host "  Created junction: $target"
             }
           }
           
-          # APPROACH 2: Also keep setup.properties (belt and suspenders)
-          $setupContent = "contentURL=app:/assets_a/"
-          Set-Content -Path "$lexiaDir\setup.properties" -Value $setupContent -NoNewline -Encoding UTF8
-          Write-Host "Created setup.properties: $setupContent"
+          # APPROACH 2: Fix exercise XML - change dir="../../" to dir="app:/assets_a/"
+          # This makes manifest URLs absolute (app:/assets_a/audio_us/...) instead of relative (../../audio_us/...)
+          # OSMF can't resolve ../../ against app:/ protocol
+          Write-Host "=== Fixing exercise XML dir attribute ==="
+          $xmlFile = "$assetsDir\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
+          if (Test-Path $xmlFile) {
+            $xml = Get-Content $xmlFile -Raw
+            $xml = $xml -replace 'dir="../../"', 'dir="app:/assets_a/"'
+            Set-Content -Path $xmlFile -Value $xml -NoNewline -Encoding UTF8
+            Write-Host "  Fixed dir attribute in $xmlFile"
+            # Verify
+            $first10 = Get-Content $xmlFile | Select-Object -First 3
+            $first10 | ForEach-Object { Write-Host "  $_" }
+          } else {
+            Write-Host "  XML file not found!"
+          }
           
-          # APPROACH 3: Also try app-storage:/assets_a/ variant
-          $setupContent2 = "contentURL=app-storage:/assets_a/"
+          # APPROACH 3: Fix PHP 8 each() compatibility
+          # The regex needs to match while(list($k, $v) = each($arr))
+          Write-Host "=== Fixing PHP 8 each() compatibility ==="
+          $phpFiles = Get-ChildItem "C:\amfphp" -Recurse -Filter "*.php" -ErrorAction SilentlyContinue
+          $fixCount = 0
+          foreach ($f in $phpFiles) {
+            $c = Get-Content $f.FullName -Raw
+            if ($c -match 'while\s*\(\s*list\s*\(\s*\$(\w+)\s*,\s*\$(\w+)\s*\)\s*=\s*each\s*\(\s*\$(\w+)\s*\)') {
+              $c = $c -replace 'while\s*\(\s*list\s*\(\s*\$(\w+)\s*,\s*\$(\w+)\s*\)\s*=\s*each\s*\(\s*\$(\w+)\s*\)\s*\)', 'foreach ($$$3 as $$$1 => $$$2)'
+              Set-Content -Path $f.FullName -Value $c -NoNewline -Encoding UTF8
+              $fixCount++
+              Write-Host "  Fixed: $($f.Name)"
+            }
+          }
+          Write-Host "  Fixed $fixCount PHP files with each()"
           
-          # Dump AssetManifest.as to understand getAssetURL()
-          Write-Host "========== FULL AssetManifest.as =========="
-          $assetManifest = Get-ChildItem "C:\swf_decompiled" -Recurse -Filter "AssetManifest.as" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($assetManifest) { Get-Content $assetManifest.FullName | ForEach-Object { Write-Host $_ } }
-          
-          # Dump full PortalDesktop.as (all lines, to see preinitialize handler)
-          Write-Host "========== FULL PortalDesktop.as (lines 240-300) =========="
-          $portalDesktop = Get-ChildItem "C:\swf_decompiled" -Recurse -Filter "PortalDesktop.as" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($portalDesktop) { Get-Content $portalDesktop.FullName | Select-Object -Skip 240 -First 60 | ForEach-Object { Write-Host $_ } }
-          
-          # Check what dirs exist in assets_a
-          Write-Host "=== assets_a subdirectories ==="
-          Get-ChildItem $assetsDir -Directory | Select-Object Name | ForEach-Object { Write-Host "  $($_.Name)" }
-          
-          # Verify audio file exists
+          # Verify audio file exists at expected path
           $audioFile = "$assetsDir\audio_us\a01_bascateg\words_can_grouped_together_they.mp3"
-          Write-Host "=== Audio file check: $audioFile ==="
+          Write-Host "=== Audio file check ==="
           if (Test-Path $audioFile) { 
             Write-Host "  EXISTS ($((Get-Item $audioFile).Length) bytes)"
           } else {
-            Write-Host "  NOT FOUND"
-            # Search for the file
-            Get-ChildItem $assetsDir -Recurse -Filter "words_can_grouped_together_they.mp3" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  Found at: $($_.FullName)" }
+            Write-Host "  NOT FOUND!"
           }
           
       - name: Setup hosts redirect and proxy
