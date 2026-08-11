@@ -81,7 +81,6 @@ jobs:
           $errorHandlerFile = "C:\amfphp\Amfphp\Plugins\AmfphpErrorHandler\AmfphpErrorHandler.php"
           if (Test-Path $errorHandlerFile) {
             $ehContent = Get-Content $errorHandlerFile -Raw
-            # Make 5th parameter ($errcontext) optional with default null
             $ehContent = $ehContent -replace 'function custom_warning_handler\((\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+),\s*(\$\w+)\)', 'function custom_warning_handler($1, $2, $3, $4, $5 = null)'
             Set-Content $errorHandlerFile -Value $ehContent -NoNewline
             Write-Host "  Patched AmfphpErrorHandler: 5th param now optional"
@@ -94,10 +93,6 @@ jobs:
             if ($fcontent -match '\beach\s*\(') {
               Write-Host "  Patching each() in $($_.Name)"
               $fcontent = $fcontent -replace 'while\(\s*each\(\$(\w+)\)\s*\)\s*{', 'foreach ($$$1 as $__key => $__val) {'
-              $modified = $true
-            }
-            if ($fcontent -match 'create_function\s*\(') {
-              Write-Host "  Patching create_function() in $($_.Name)"
               $modified = $true
             }
             if ($fcontent -match 'get_magic_quotes_gpc\s*\(') {
@@ -115,25 +110,10 @@ jobs:
             }
           }
           
-          # Also scan for other potential issues
-          $compatWarnings = @()
-          Get-ChildItem -Path "C:\amfphp\Amfphp" -Filter "*.php" -Recurse | ForEach-Object {
-            $fcontent = Get-Content $_.FullName -Raw
-            if ($fcontent -match '\beach\s*\(') { $compatWarnings += "$($_.Name): still uses each()" }
-            if ($fcontent -match 'create_function\s*\(') { $compatWarnings += "$($_.Name): still uses create_function()" }
-          }
-          if ($compatWarnings.Count -gt 0) {
-            Write-Host "  Remaining issues:"
-            $compatWarnings | ForEach-Object { Write-Host "    $_" }
-          } else {
-            Write-Host "  All known PHP 8.x compat issues patched"
-          }
-          
-          # List services directory
           Write-Host "=== Services directory ==="
           Get-ChildItem "C:\amfphp\Amfphp\Services" | ForEach-Object { Write-Host "  $($_.Name)" }
 
-      - name: Setup hosts redirect
+      - name: Setup hosts redirect and proxy
         shell: pwsh
         run: |
           $hostsFile = "C:\Windows\System32\drivers\etc\hosts"
@@ -149,6 +129,8 @@ jobs:
           foreach ($entry in $entries) { Add-Content -Path $hostsFile -Value $entry }
           Write-Host "Hosts file updated"
           Copy-Item "scripts/proxy.py" "C:\proxy.py" -Force
+          Copy-Item "scripts/CORE5.sol" "C:\CORE5.sol" -Force
+          Write-Host "Proxy and SOL file copied"
 
       - name: Run mock server and app
         shell: pwsh
@@ -161,56 +143,119 @@ jobs:
           $fg = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool SetForegroundWindow(IntPtr h);" -Name FG -Namespace W -PassThru
           $sw = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern bool ShowWindow(IntPtr h, int n);" -Name SW -Namespace W -PassThru
 
-          # Start PHP built-in server with document root at C:\amfphp (so /Amfphp/index.php is accessible)
+          # ============================================================
+          # STEP 1: Start PHP server
+          # ============================================================
           Write-Host "Starting PHP server on port 8080..."
           $phpJob = Start-Job -ScriptBlock {
             php -S 127.0.0.1:8080 -t C:\amfphp 2>&1 | Out-File C:\php-stdout.txt -Encoding UTF8
           }
           Start-Sleep -Seconds 3
           
-          # Test PHP server - access the AMFPHP gateway
-          Write-Host "Testing PHP server at /Amfphp/index.php..."
+          Write-Host "Testing PHP server..."
           try {
             $testResp = Invoke-WebRequest -Uri "http://127.0.0.1:8080/Amfphp/index.php" -UseBasicParsing -TimeoutSec 5
-            Write-Host "PHP server responded: $($testResp.StatusCode), length=$($testResp.Content.Length)"
+            Write-Host "PHP server OK: $($testResp.StatusCode)"
           } catch {
-            Write-Host "PHP server test result: $_"
-          }
-          
-          # Also test with a POST (simulating AMF request)
-          Write-Host "Testing PHP with POST (AMF-like)..."
-          try {
-            $testResp2 = Invoke-WebRequest -Uri "http://127.0.0.1:8080/Amfphp/index.php" -Method POST -Body @(0x00, 0x00) -ContentType "application/x-amf" -UseBasicParsing -TimeoutSec 5
-            Write-Host "PHP POST responded: $($testResp2.StatusCode), length=$($testResp2.Content.Length)"
-          } catch {
-            Write-Host "PHP POST test result: $_"
-          }
-          
-          if (Test-Path C:\php-stdout.txt) {
-            Write-Host "=== PHP stdout (so far) ==="
-            Get-Content C:\php-stdout.txt
+            Write-Host "PHP server test: $_"
           }
 
-          # Start Python HTTPS proxy
+          # ============================================================
+          # STEP 2: Start HTTPS proxy
+          # ============================================================
           Write-Host "Starting HTTPS proxy on port 443..."
           $proxyJob = Start-Job -ScriptBlock { python C:\proxy.py 2>&1 | Out-File C:\proxy-stdout.txt -Encoding UTF8 }
           Start-Sleep -Seconds 5
           
-          Write-Host "=== Proxy job state ==="
-          Write-Host "Job status: $($proxyJob.State)"
-          if (Test-Path C:\proxy-stdout.txt) { Get-Content C:\proxy-stdout.txt }
-          
-          Write-Host "=== netstat ==="
-          netstat -an | Select-String ":443 "
-          netstat -an | Select-String ":8080 "
+          netstat -an | Select-String ":443 ",":8080 "
 
-          # Launch app
-          Write-Host "Launching LexiaCore5..."
+          # ============================================================
+          # STEP 3: First app launch - create SharedObject directory
+          # ============================================================
+          Write-Host "=== First app launch (to create SharedObject dirs) ==="
           $exe = "C:\Program Files (x86)\Lexia Core5\LexiaCore5.exe"
+          $proc1 = Start-Process -FilePath $exe -PassThru
+          Write-Host "First launch PID: $($proc1.Id)"
+          Start-Sleep -Seconds 15
+          
+          # Kill first instance
+          Write-Host "Killing first instance..."
+          Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 3
+          
+          # ============================================================
+          # STEP 4: Find SharedObject directory and place .sol file
+          # ============================================================
+          Write-Host "=== Searching for #SharedObjects directory ==="
+          $solPlaced = $false
+          
+          # Search common AIR SharedObject locations
+          $searchPaths = @(
+            "$env:APPDATA",
+            "$env:LOCALAPPDATA"
+          )
+          
+          foreach ($searchPath in $searchPaths) {
+            Write-Host "Searching in: $searchPath"
+            $soDirs = Get-ChildItem -Path $searchPath -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
+            foreach ($soDir in $soDirs) {
+              Write-Host "Found #SharedObjects at: $($soDir.FullName)"
+              # List subdirectories (might contain PortalDesktop.swf or be flat)
+              $subDirs = Get-ChildItem -Path $soDir.FullName -Directory -ErrorAction SilentlyContinue
+              if ($subDirs) {
+                foreach ($sub in $subDirs) {
+                  Write-Host "  Subdir: $($sub.Name)"
+                  $solDest = Join-Path $sub.FullName "CORE5.sol"
+                  Copy-Item "C:\CORE5.sol" $solDest -Force
+                  Write-Host "  Placed CORE5.sol at: $solDest"
+                  $solPlaced = $true
+                }
+              }
+              # Also place directly in #SharedObjects root
+              $solDestRoot = Join-Path $soDir.FullName "CORE5.sol"
+              Copy-Item "C:\CORE5.sol" $solDestRoot -Force
+              Write-Host "  Also placed CORE5.sol at: $solDestRoot"
+              $solPlaced = $true
+            }
+          }
+          
+          # Also search for any directory that looks like an AIR app data folder
+          if (-not $solPlaced) {
+            Write-Host "No #SharedObjects found yet, searching for AIR app data..."
+            $airDirs = Get-ChildItem -Path "$env:APPDATA" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "lexia|Lexia|core5|Core5|Adobe" }
+            foreach ($airDir in $airDirs) {
+              Write-Host "Found potential AIR dir: $($airDir.FullName)"
+              $soPath = Join-Path $airDir.FullName "#SharedObjects"
+              New-Item -ItemType Directory -Force -Path $soPath | Out-Null
+              # Create subdirectory for the SWF name
+              $swfPath = Join-Path $soPath "PortalDesktop.swf"
+              New-Item -ItemType Directory -Force -Path $swfPath | Out-Null
+              $solDest = Join-Path $swfPath "CORE5.sol"
+              Copy-Item "C:\CORE5.sol" $solDest -Force
+              Write-Host "  Created and placed CORE5.sol at: $solDest"
+              $solPlaced = $true
+            }
+          }
+          
+          # Also check the AIR encrypted store path
+          if (-not $solPlaced) {
+            Write-Host "Searching for Lexia in all AppData..."
+            $allAir = Get-ChildItem -Path "$env:APPDATA" -Directory -ErrorAction SilentlyContinue
+            foreach ($dir in $allAir) {
+              Write-Host "  AppData dir: $($dir.Name)"
+            }
+          }
+          
+          Write-Host "SOL placed: $solPlaced"
+
+          # ============================================================
+          # STEP 5: Second app launch - with siteId pre-set
+          # ============================================================
+          Write-Host "=== Second app launch (with SharedObject siteId) ==="
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "App PID: $($proc.Id)"
-          Start-Sleep -Seconds 20
-
+          Start-Sleep -Seconds 25
+          
           $p = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
           if ($p) {
             Write-Host "Process alive! MainWindowHandle: $($p.MainWindowHandle)"
@@ -222,7 +267,7 @@ jobs:
               Start-Sleep -Seconds 3
             }
           } else {
-            Write-Host "Process not found!"
+            Write-Host "Process not found! App may have crashed."
           }
 
           $screen = [System.Windows.Forms.Screen]::PrimaryScreen
@@ -237,11 +282,9 @@ jobs:
           }
           
           TakeScreenshot "01-initial.png"
-          
-          # Wait for app to fully load
           Start-Sleep -Seconds 5
 
-          # Add mouse_event and GetWindowRect for clicking
+          # Add mouse_event and GetWindowRect
           $me = Add-Type -MemberDefinition "[DllImport(`"user32.dll`")] public static extern void mouse_event(uint f, uint x, uint y, uint c, uint i);" -Name ME -Namespace W -PassThru
           Add-Type -TypeDefinition @"
           using System;
@@ -253,8 +296,6 @@ jobs:
           }
           "@
 
-          # Get the actual window position/size (the screenshot dialog shows a 1024x768 window,
-          # but its on-screen origin may not be 0,0 - find its real client rect)
           $p2 = Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue
           $winLeft = 0; $winTop = 0
           if ($p2 -and $p2.MainWindowHandle -ne 0) {
@@ -277,63 +318,114 @@ jobs:
             Start-Sleep -Seconds 2
           }
 
-          # Click the "Student/Parent" button - coordinates from the observed dialog
-          # (dialog window content area, button center around x=666, y=381 in a 1024x768 window)
-          Write-Host "=== Clicking Student/Parent button ==="
+          # ============================================================
+          # STEP 6: Handle whatever screen appears
+          # ============================================================
+          # With siteId pre-set, the app should skip SetupScreen and go to:
+          #   VerifySiteScreen (loading) -> VerifyStudentScreen (login form)
+          # OR if siteId bypass didn''t work, we''ll see the SetupScreen
+          #   and need to click Student/Parent -> type email -> click Next
+          
+          Start-Sleep -Seconds 5
+          TakeScreenshot "02-after-wait.png"
+          
+          # STRATEGY A: If we see the SetupScreen (first-time setup with email entry)
+          # Click the Student/Parent button (same as before)
+          Write-Host "=== Attempting Student/Parent button click ==="
           ClickAt 666 381 "Student/Parent button"
-          TakeScreenshot "02-after-student-parent-click.png"
+          TakeScreenshot "03-after-student-parent.png"
           
           Start-Sleep -Seconds 3
-          TakeScreenshot "03-teacher-email-screen.png"
+          TakeScreenshot "04-teacher-email-screen.png"
           
-          # Click on the Teacher email input field and type an email
+          # Type teacher email
           Write-Host "=== Entering teacher email ==="
           ClickAt 529 364 "Teacher email field"
+          Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("teacher@portable.local")
           Start-Sleep -Seconds 1
-          TakeScreenshot "04-email-typed.png"
+          TakeScreenshot "05-email-typed.png"
           
-          # Try submitting via ENTER first (form default button)
-          Write-Host "=== Pressing Enter to submit ==="
+          # STRATEGY: Try keyboard navigation (TAB + SPACE) to click the Next button
+          # Flex apps support keyboard focus navigation:
+          #   TAB moves to next focusable element
+          #   SPACE activates the focused button
+          Write-Host "=== Keyboard navigation: TAB to Next button then SPACE ==="
+          
+          # First, click the email field to ensure focus is there
+          ClickAt 529 364 "Refocus email field"
+          Start-Sleep -Milliseconds 500
+          
+          # TAB once -> should move to previous button
+          [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
+          Start-Sleep -Milliseconds 500
+          TakeScreenshot "06-after-first-tab.png"
+          
+          # TAB again -> should move to next button
+          [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
+          Start-Sleep -Milliseconds 500
+          TakeScreenshot "07-after-second-tab.png"
+          
+          # Press SPACE to activate the focused button
+          Write-Host "  Pressing SPACE to activate button..."
+          [System.Windows.Forms.SendKeys]::SendWait(" ")
+          Start-Sleep -Seconds 5
+          TakeScreenshot "08-after-space.png"
+          
+          # Also try ENTER
           [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 5
-          TakeScreenshot "05-after-enter.png"
+          TakeScreenshot "09-after-enter.png"
           
-          # If still on same screen, try clicking the right arrow at refined center
-          Write-Host "=== Clicking next (right arrow) - refined center ==="
-          ClickAt 562 494 "Next arrow button refined"
+          # If keyboard didn''t work, try clicking the Next button directly
+          Write-Host "=== Fallback: direct click on Next button ==="
+          ClickAt 565 503 "Next button direct click"
           Start-Sleep -Seconds 5
-          TakeScreenshot "06-after-next-refined.png"
+          TakeScreenshot "10-after-direct-click.png"
           
-          # Try a slightly different spot in case hit area is offset
-          ClickAt 565 490 "Next arrow button alt1"
-          Start-Sleep -Seconds 3
-          TakeScreenshot "07-after-next-alt1.png"
+          # Try double-click
+          ClickAt 565 503 "Next button first click"
+          Start-Sleep -Milliseconds 200
+          $me::mouse_event(0x02, 0, 0, 0, 0)
+          Start-Sleep -Milliseconds 100
+          $me::mouse_event(0x04, 0, 0, 0, 0)
+          Start-Sleep -Milliseconds 100
+          $me::mouse_event(0x02, 0, 0, 0, 0)
+          Start-Sleep -Milliseconds 100
+          $me::mouse_event(0x04, 0, 0, 0, 0)
+          Start-Sleep -Seconds 5
+          TakeScreenshot "11-after-doubleclick.png"
           
-          ClickAt 558 497 "Next arrow button alt2"
-          Start-Sleep -Seconds 3
-          TakeScreenshot "08-after-next-alt2.png"
+          # ============================================================
+          # STRATEGY B: If we see a student login screen (siteId bypass worked)
+          # The VerifyStudentScreen should have username/password fields
+          # ============================================================
+          Write-Host "=== Checking for student login screen ==="
+          TakeScreenshot "12-check-login.png"
           
-          # Try typing generic student credentials in case a login form appeared
+          # Try typing student credentials (in case we''re on a login screen)
+          # Click center of screen where username field might be
+          ClickAt 512 350 "Possible username field"
+          Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("student")
           Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
           Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("password")
           Start-Sleep -Milliseconds 500
-          TakeScreenshot "09-before-submit.png"
           [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 10
+          TakeScreenshot "13-after-student-login.png"
           
-          TakeScreenshot "10-after-login.png"
-          
-          # Wait and take more screenshots to see if app progresses
-          for ($i = 11; $i -le 17; $i++) {
+          # Wait for app to progress
+          for ($i = 14; $i -le 22; $i++) {
             Start-Sleep -Seconds 5
-            TakeScreenshot "{0:D2}-progress.png" -f $i
+            TakeScreenshot ("{0:D2}-progress.png" -f $i)
           }
 
-          # Results
+          # ============================================================
+          # STEP 7: Collect all logs and results
+          # ============================================================
           Write-Host "=== Proxy stdout ==="
           if (Test-Path C:\proxy-stdout.txt) { Get-Content C:\proxy-stdout.txt }
           Write-Host "=== PHP stdout ==="
@@ -368,6 +460,18 @@ jobs:
               Write-Host "=== PortalDesktop.log contents ==="
               Get-Content "C:\PortalDesktop.log"
             }
+          }
+
+          # List all SharedObject directories found (for debugging)
+          Write-Host "=== All #SharedObjects directories ==="
+          $allSO = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Recurse -Directory -Filter "#SharedObjects" -ErrorAction SilentlyContinue
+          if ($allSO) {
+            foreach ($so in $allSO) {
+              Write-Host "  $($so.FullName)"
+              Get-ChildItem $so.FullName -Recurse | ForEach-Object { Write-Host "    $($_.FullName)" }
+            }
+          } else {
+            Write-Host "  None found"
           }
 
           # Cleanup
