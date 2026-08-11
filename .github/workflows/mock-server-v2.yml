@@ -155,17 +155,17 @@ jobs:
             }
           }
           
-          # Fix exercise XML dir attribute for all files to use local assets_a/ path
+          # Fix exercise XML dir attribute for all files to use ../../ (relative to xml_us subfolders)
           Write-Host "=== Fixing exercise XML dir attribute (all XML files) ==="
-          $dirValue = "assets_a/"
+          $dirValue = "../../"
           $appDataDir = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
           $xmlFiles = Get-ChildItem -Path "$assetsDir\xml_us","$appDataDir\assets_a\xml_us" -Recurse -Filter "*.xml" -ErrorAction SilentlyContinue
           $fixedCount = 0
           foreach ($f in $xmlFiles) {
             $xml = Get-Content $f.FullName -Raw
-            if ($xml -match 'dir="https://student\.mylexia\.com/assets_a/"' -or $xml -match 'dir="\.\./\.\./"') {
+            if ($xml -match 'dir="assets_a/"' -or $xml -match 'dir="https://student\.mylexia\.com/assets_a/"') {
+              $xml = $xml -replace 'dir="assets_a/"', ('dir="' + $dirValue + '"')
               $xml = $xml -replace 'dir="https://student\.mylexia\.com/assets_a/"', ('dir="' + $dirValue + '"')
-              $xml = $xml -replace 'dir="\.\./\.\./"', ('dir="' + $dirValue + '"')
               Set-Content -Path $f.FullName -Value $xml -NoNewline -Encoding UTF8
               $fixedCount++
             }
