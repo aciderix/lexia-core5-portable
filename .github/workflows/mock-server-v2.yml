@@ -291,6 +291,14 @@ jobs:
           Start-Sleep -Seconds 8
           TakeScreenshot "06-after-login.png"
 
+          # The app shows "Is your name Admin Portable?" confirmation
+          # screen after first login. Press ENTER to confirm and trigger
+          # the second login call (authenticateOnly: false).
+          Write-Host "=== Confirming name (Is your name Admin Portable?) ==="
+          PressKey 13  # ENTER
+          Start-Sleep -Seconds 8
+          TakeScreenshot "06b-after-name-confirm.png"
+
           # Wait for app to load (login + level selection screen)
           Write-Host "=== Waiting for level selection screen ==="
           for ($i = 7; $i -le 12; $i++) {
