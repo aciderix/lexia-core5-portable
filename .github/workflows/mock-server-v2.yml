@@ -293,22 +293,26 @@ jobs:
           Start-Sleep -Seconds 1
           TakeScreenshot "04-email-typed.png"
           
-          # Click the right arrow (next) button
-          Write-Host "=== Clicking next (right arrow) ==="
-          ClickAt 563 501 "Next arrow button"
+          # Try submitting via ENTER first (form default button)
+          Write-Host "=== Pressing Enter to submit ==="
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 5
-          TakeScreenshot "05-after-teacher-submit.png"
+          TakeScreenshot "05-after-enter.png"
           
-          # This may lead to a site ID verification or student selection screen.
-          # Take a few more screenshots to observe, then try clicking center/next again
-          # in case there is a "verify site id" auto-continue or another next button
+          # If still on same screen, try clicking the right arrow at refined center
+          Write-Host "=== Clicking next (right arrow) - refined center ==="
+          ClickAt 562 494 "Next arrow button refined"
+          Start-Sleep -Seconds 5
+          TakeScreenshot "06-after-next-refined.png"
+          
+          # Try a slightly different spot in case hit area is offset
+          ClickAt 565 490 "Next arrow button alt1"
           Start-Sleep -Seconds 3
-          TakeScreenshot "06-followup-screen.png"
+          TakeScreenshot "07-after-next-alt1.png"
           
-          # Try clicking a likely "next"/continue button position again (same spot)
-          ClickAt 563 501 "Next arrow button (retry)"
-          Start-Sleep -Seconds 5
-          TakeScreenshot "07-after-second-next.png"
+          ClickAt 558 497 "Next arrow button alt2"
+          Start-Sleep -Seconds 3
+          TakeScreenshot "08-after-next-alt2.png"
           
           # Try typing generic student credentials in case a login form appeared
           [System.Windows.Forms.SendKeys]::SendWait("student")
@@ -317,14 +321,14 @@ jobs:
           Start-Sleep -Milliseconds 500
           [System.Windows.Forms.SendKeys]::SendWait("password")
           Start-Sleep -Milliseconds 500
-          TakeScreenshot "08-before-submit.png"
+          TakeScreenshot "09-before-submit.png"
           [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep -Seconds 10
           
-          TakeScreenshot "09-after-login.png"
+          TakeScreenshot "10-after-login.png"
           
           # Wait and take more screenshots to see if app progresses
-          for ($i = 10; $i -le 16; $i++) {
+          for ($i = 11; $i -le 17; $i++) {
             Start-Sleep -Seconds 5
             TakeScreenshot "{0:D2}-progress.png" -f $i
           }
