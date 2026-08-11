@@ -176,11 +176,9 @@ jobs:
           foreach ($soDir in $soDirs) {
             Write-Host "Found: $($soDir.FullName)"
             if ($soDir.FullName -match "com\.lexiareading") {
-              # Place in root #SharedObjects (where the app reads from)
               $solDest = Join-Path $soDir.FullName "CORE5.sol"
               Copy-Item "C:\CORE5.sol" $solDest -Force
               Write-Host "  Placed CORE5.sol at: $solDest"
-              # Also place in PortalDesktop.swf subdirectory
               $swfDir = Join-Path $soDir.FullName "PortalDesktop.swf"
               if (Test-Path $swfDir) {
                 $solDest2 = Join-Path $swfDir "CORE5.sol"
@@ -254,10 +252,8 @@ jobs:
           TakeScreenshot "01-initial.png"
 
           # ============================================================
-          # STEP 5: Navigate to password screen
+          # STEP 5: Activate Student/Parent flow (TAB+SPACE via keybd_event)
           # ============================================================
-          # Strategy: Use TAB + SPACE (keybd_event) which worked in run #37
-          # TAB moves focus to Student/Parent button, SPACE activates it
           Write-Host "=== Tab+Space to activate Student/Parent ==="
           $fg::SetForegroundWindow($p2.MainWindowHandle) | Out-Null
           Start-Sleep -Milliseconds 500
@@ -266,80 +262,76 @@ jobs:
           PressKey 32  # SPACE
           Start-Sleep -Seconds 5
           TakeScreenshot "02-after-tab-space.png"
-          
-          # Also try mouse click on Student/Parent as backup
-          Write-Host "=== Mouse click Student/Parent ==="
-          ClickAt 666 381 "Student/Parent button"
-          Start-Sleep -Seconds 3
-          TakeScreenshot "03-after-click.png"
-          
-          # If we''re on the email screen, type email and use keybd Enter
-          # (The .sol with siteId=1 should bypass email, but just in case)
-          Write-Host "=== Checking if email screen appeared ==="
-          ClickAt 529 364 "Email field (if visible)"
+
+          # ============================================================
+          # STEP 6: Enter teacher email, submit with hardware ENTER
+          # ============================================================
+          Write-Host "=== Entering teacher email ==="
+          ClickAt 529 364 "Email field"
           Start-Sleep -Milliseconds 500
           TypeText "teacher@school.edu"
           Start-Sleep -Milliseconds 500
-          TakeScreenshot "04-email-typed.png"
-          
-          # Try Enter to submit email (keybd_event, not SendKeys)
-          PressKey 13  # ENTER
-          Start-Sleep -Seconds 5
-          TakeScreenshot "05-after-enter.png"
-          
-          # If still on initial screen, try Tab+Space again
-          PressKey 9   # TAB
-          Start-Sleep -Milliseconds 500
-          PressKey 32  # SPACE
-          Start-Sleep -Seconds 5
-          TakeScreenshot "06-after-second-tab-space.png"
+          TakeScreenshot "03-email-typed.png"
+
+          Write-Host "=== Submitting email with hardware ENTER ==="
+          PressKey 13  # ENTER (hardware-level, this is what worked in run #38)
+          Start-Sleep -Seconds 6
+          TakeScreenshot "04-after-email-enter.png"
 
           # ============================================================
-          # STEP 6: Enter student credentials on password screen
+          # STEP 7: "Congratulations" confirmation screen -> ENTER to advance
           # ============================================================
-          Write-Host "=== Attempting to enter credentials ==="
-          TakeScreenshot "07-before-credentials.png"
-          
-          # Click on username field (center ~530, 365)
-          ClickAt 530 365 "Username field"
+          Write-Host "=== Advancing past Congratulations screen ==="
+          PressKey 13  # ENTER
+          Start-Sleep -Seconds 6
+          TakeScreenshot "05-after-congrats-enter.png"
+
+          # Backup: also click where the arrow/continue button typically sits
+          # (in case the Congratulations screen needs a click, not Enter)
+          ClickAt 512 502 "Congrats continue button (guess)"
+          Start-Sleep -Seconds 3
+          TakeScreenshot "06-after-congrats-click.png"
+
+          # ============================================================
+          # STEP 8: Student login screen (Portable Site) - enter credentials
+          # Coordinates confirmed from user screenshot (1024x768 window):
+          #   Username field center: (530, 382)
+          #   Password field center: (530, 427)
+          #   Circular arrow submit button center: (512, 502)
+          # ============================================================
+          Write-Host "=== Entering student credentials ==="
+          TakeScreenshot "07-login-screen.png"
+
+          ClickAt 530 382 "Username field"
           Start-Sleep -Milliseconds 500
-          # Clear any existing text
-          [System.Windows.Forms.SendKeys]::SendWait("^a")
-          Start-Sleep -Milliseconds 200
-          [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")
-          Start-Sleep -Milliseconds 200
           TypeText "student"
           Start-Sleep -Milliseconds 500
           TakeScreenshot "08-username-entered.png"
-          
-          # Tab to password field (keybd_event)
-          PressKey 9   # TAB
+
+          ClickAt 530 427 "Password field"
           Start-Sleep -Milliseconds 500
-          
-          # Type password
           TypeText "password"
           Start-Sleep -Milliseconds 500
           TakeScreenshot "09-password-entered.png"
-          
-          # Click login button (center ~500, 505) or press Enter
-          Write-Host "=== Clicking login button ==="
-          ClickAt 500 505 "Login button"
-          Start-Sleep -Seconds 5
-          TakeScreenshot "10-after-login-click.png"
-          
-          # Also try Enter as backup
-          PressKey 13  # ENTER
-          Start-Sleep -Seconds 10
-          TakeScreenshot "11-after-login-enter.png"
-          
-          # Wait for app to progress
-          for ($i = 12; $i -le 25; $i++) {
+
+          Write-Host "=== Clicking arrow submit button ==="
+          ClickAt 512 502 "Arrow submit button"
+          Start-Sleep -Seconds 6
+          TakeScreenshot "10-after-submit-click.png"
+
+          # Backup: hardware ENTER in case click missed
+          PressKey 13
+          Start-Sleep -Seconds 8
+          TakeScreenshot "11-after-submit-enter.png"
+
+          # Wait for app to progress (login() call + UI transition)
+          for ($i = 12; $i -le 22; $i++) {
             Start-Sleep -Seconds 5
             TakeScreenshot ("{0:D2}-progress.png" -f $i)
           }
 
           # ============================================================
-          # STEP 7: Collect logs
+          # STEP 9: Collect logs
           # ============================================================
           Write-Host "=== Proxy stdout ==="
           if (Test-Path C:\proxy-stdout.txt) { Get-Content C:\proxy-stdout.txt }
@@ -350,7 +342,6 @@ jobs:
           Write-Host "=== Processes ==="
           Get-Process -Name "python","php","LexiaCore5" -ErrorAction SilentlyContinue | Format-Table Name,Id,MainWindowTitle -AutoSize
 
-          # Find PortalDesktop.log
           Write-Host "=== PortalDesktop.log ==="
           $found = Get-ChildItem -Path $env:APPDATA,$env:LOCALAPPDATA -Filter "PortalDesktop.log" -Recurse -ErrorAction SilentlyContinue
           if ($found) {
@@ -361,7 +352,6 @@ jobs:
             Get-Content $found[0].FullName
           }
 
-          # List all .sol files
           Write-Host "=== All .sol files ==="
           $allSO = Get-ChildItem -Path "$env:APPDATA","$env:LOCALAPPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue
           if ($allSO) {
@@ -372,7 +362,6 @@ jobs:
             }
           }
 
-          # Cleanup
           Get-Process -Name "LexiaCore5" -ErrorAction SilentlyContinue | Stop-Process -Force
           Stop-Job $phpJob -ErrorAction SilentlyContinue
           Stop-Job $proxyJob -ErrorAction SilentlyContinue
