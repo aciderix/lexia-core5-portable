@@ -17,7 +17,7 @@ class AMFClient {
         $response->_explicitType = 'com.lexialearning.lrs.api.HandshakeResponseVO';
         $response->errorCode = 0;
         $response->errorMessage = null;
-        $response->contentUrl = "https://student.mylexia.com/assets_a/";
+        $response->contentUrl = "app:/assets_a/";
         return $response;
     }
     
@@ -61,7 +61,7 @@ class AMFClient {
         $response->personName = "Admin Portable";
         $response->language = "en-US";
         $response->region = "us";
-        $response->contentUrl = "https://student.mylexia.com/assets_a/";
+        $response->contentUrl = "app:/assets_a/";
         $response->purpose = "course";
         $response->currentPhaseId = "1";
         $response->currentUnitIdList = array();
@@ -89,10 +89,13 @@ class AMFClient {
         $response->_explicitType = 'com.lexialearning.lrs.api.UnitStatusResponseVO';
         $response->errorCode = 0;
         $response->errorMessage = null;
-        // Empty progress - student hasn't done anything yet
+        $response->errorKindList = array();
+        $response->isStruggling = false;
+        $response->roundLeader = 0;
+        $response->stepId = "";
         $response->unitId = isset($req->unitId) ? $req->unitId : "";
         $response->studentId = isset($req->studentId) ? $req->studentId : 1;
-        $response->status = "not_started";
+        $response->status = "in_progress";
         $response->progress = 0;
         $response->mastery = 0;
         $response->attempts = 0;
@@ -103,6 +106,9 @@ class AMFClient {
         $response->currentStep = "";
         $response->skillData = array();
         $response->sessionData = null;
+        $response->currentLevel = 1;
+        $response->placementLevel = 1;
+        $response->isPlacement = false;
         return $response;
     }
     
