@@ -263,7 +263,9 @@ jobs:
             $dirValue = "https://student.mylexia.com/assets_a/"
             Write-Host "  Using dir=$dirValue"
             $xml = Get-Content $xmlFile -Raw
-            $xml = $xml -replace 'dir="../../"', "dir=\"$dirValue\""
+            $replacePattern = 'dir="../../"'
+            $replaceValue = 'dir="' + $dirValue + '"'
+            $xml = $xml -replace $replacePattern, $replaceValue
             Set-Content -Path $xmlFile -Value $xml -NoNewline -Encoding UTF8
             Write-Host "  Fixed dir attribute in $xmlFile"
             # Verify
