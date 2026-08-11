@@ -170,7 +170,7 @@ jobs:
           New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
           
           # Export all ActionScript code
-          & java -jar $ffdecJar.FullName -export script $exportDir $swf 2>&1 | Select-Object -First 20
+          & java -jar $ffdecJar.FullName -export script $exportDir $swf 2>&1 | Out-Null
           
           Write-Host "=== Searching for CONTENT_URL usage ==="
           $scripts = Get-ChildItem $exportDir -Recurse -Filter "*.as" -ErrorAction SilentlyContinue
