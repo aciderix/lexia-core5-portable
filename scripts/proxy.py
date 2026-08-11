@@ -123,14 +123,113 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f'Proxy error: {e}'.encode())
     
+def resolve_asset_file(req_path):
+    parsed = urllib.parse.urlparse(req_path)
+    clean_path = urllib.parse.unquote(parsed.path).lstrip('/')
+    clean_win = clean_path.replace('/', os.sep)
+    
+    appdata = os.environ.get('APPDATA', '')
+    appdata_root = os.path.join(appdata, 'com.lexiareading.core5.desktop.us', 'Local Store') if appdata else ''
+    
+    candidates = []
+    # 1. Direct path in content root
+    candidates.append(os.path.join(CONTENT_ROOT, clean_win))
+    # 2. Inside assets_a in content root
+    candidates.append(os.path.join(CONTENT_ROOT, 'assets_a', clean_win))
+    # 3. If path starts with assets_a, strip leading assets_a
+    if clean_path.lower().startswith('assets_a/'):
+        stripped = clean_path[9:].replace('/', os.sep)
+        candidates.append(os.path.join(CONTENT_ROOT, stripped))
+        candidates.append(os.path.join(CONTENT_ROOT, 'assets_a', stripped))
+    # 4. AppData candidates
+    if appdata_root:
+        candidates.append(os.path.join(appdata_root, clean_win))
+        candidates.append(os.path.join(appdata_root, 'assets_a', clean_win))
+        if clean_path.lower().startswith('assets_a/'):
+            stripped = clean_path[9:].replace('/', os.sep)
+            candidates.append(os.path.join(appdata_root, stripped))
+            candidates.append(os.path.join(appdata_root, 'assets_a', stripped))
+            
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand, clean_path
+            
+    # Recursive search fallback by filename
+    filename = os.path.basename(clean_win)
+    if filename:
+        for search_base in [CONTENT_ROOT, appdata_root]:
+            if search_base and os.path.exists(search_base):
+                for root, dirs, files in os.walk(search_base):
+                    if filename in files:
+                        found_path = os.path.join(root, filename)
+                        log(f"  Found file via recursive search: {found_path}")
+                        return found_path, clean_path
+                        
+    return None, clean_path
+
+class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def do_HEAD(self):
+        self.do_GET(head_only=True)
+
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
+        
+        log(f"=== PROXY: POST {self.path} ({content_length} bytes) -> {PHP_BACKEND} ===")
+        
+        req = urllib.request.Request(
+            PHP_BACKEND,
+            data=post_data,
+            headers={
+                'Content-Type': self.headers.get('Content-Type', 'application/x-amf'),
+                'Content-Length': str(content_length),
+            },
+            method='POST'
+        )
+        
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                res_data = response.read()
+                self.send_response(200)
+                self.send_header('Content-Type', response.headers.get('Content-Type', 'application/x-amf'))
+                self.send_header('Content-Length', len(res_data))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(res_data)
+                log(f"  PHP responded: {len(res_data)} bytes, type={response.headers.get('Content-Type')}")
+                log(f"  Response hex (first 100): {res_data[:100].hex()}")
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8', errors='replace') if e.fp else ''
+            log(f"  PHP HTTP ERROR {e.code}: {e.reason}")
+            log(f"  PHP error body: {error_body[:500]}")
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(b'Proxy error: PHP backend error')
+        except urllib.error.URLError as e:
+            log(f"  PHP URL ERROR: {e}")
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(b'Proxy error: PHP backend unavailable')
+        except Exception as e:
+            log(f"  PROXY ERROR: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(f'Proxy error: {e}'.encode())
+    
     def do_GET(self, head_only=False):
         log(f"=== PROXY: GET {self.path} ===")
         
-        # Parse the path
         parsed = urllib.parse.urlparse(self.path)
         req_path = urllib.parse.unquote(parsed.path)
         
-        # Flash crossdomain.xml request (matches /crossdomain.xml, /assets_a/crossdomain.xml, etc.)
         if req_path.endswith('crossdomain.xml'):
             log(f"  Serving crossdomain.xml for Flash Security Policy ({req_path})")
             self.send_response(200)
@@ -144,7 +243,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(CROSSDOMAIN_XML)
             return
 
-        # Skip AMF gateway requests
         if req_path.startswith('/clientapi/'):
             resp = b'{"status":"ok","proxy":"running"}'
             self.send_response(200)
@@ -156,38 +254,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(resp)
             return
         
-        # Try to serve content files from the local filesystem
-        clean_path = req_path[1:] if req_path.startswith('/') else req_path
-        file_path = os.path.join(CONTENT_ROOT, clean_path.replace('/', '\\'))
-        
-        if not os.path.isfile(file_path):
-            appdata = os.environ.get('APPDATA', '')
-            if appdata:
-                appdata_path = os.path.join(appdata, 'com.lexiareading.core5.desktop.us', 'Local Store', clean_path.replace('/', '\\'))
-                if os.path.isfile(appdata_path):
-                    file_path = appdata_path
-
-        if not os.path.isfile(file_path):
-            filename = os.path.basename(clean_path)
-            if filename:
-                for search_base in [CONTENT_ROOT, os.environ.get('APPDATA', '')]:
-                    if search_base and os.path.exists(search_base):
-                        for root, dirs, files in os.walk(search_base):
-                            if filename in files:
-                                file_path = os.path.join(root, filename)
-                                log(f"  Found file via recursive search: {file_path}")
-                                break
-                        if os.path.isfile(file_path):
-                            break
-        
+        file_path, clean_path = resolve_asset_file(self.path)
         ext = os.path.splitext(clean_path)[1].lower()
-        if os.path.isfile(file_path):
+        
+        if file_path and os.path.isfile(file_path):
             try:
                 with open(file_path, 'rb') as f:
                     file_data = f.read()
-                
                 content_type = MIME_OVERRIDES.get(ext, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')
-                
                 self.send_response(200)
                 self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(file_data)))
@@ -205,7 +279,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(f'File serve error: {e}'.encode())
         elif ext == '.mp3':
             log(f"  Missing MP3 file ({req_path}) - serving silent MP3 fallback")
-            # Minimal 1-frame valid MP3 silence buffer (MPEG-1 Layer 3, 128 kbps, 44.1 kHz, stereo)
             silent_mp3 = b'\xff\xfb\x90\xc4' + b'\x00' * 413
             self.send_response(200)
             self.send_header('Content-Type', 'audio/mpeg')
@@ -215,7 +288,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if not head_only:
                 self.wfile.write(silent_mp3)
         else:
-            log(f"  File not found: {file_path}")
+            log(f"  File not found for {req_path}")
             self.send_response(404)
             self.send_header('Content-Type', 'text/plain')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -229,15 +302,77 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 import threading
 
 def run_http_asset_server():
-    class AssetHandler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=CONTENT_ROOT, **kwargs)
-        
-        def end_headers(self):
+    class AssetHandler(http.server.BaseHTTPRequestHandler):
+        def do_OPTIONS(self):
+            self.send_response(200)
             self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD')
             self.send_header('Access-Control-Allow-Headers', '*')
-            super().end_headers()
-            
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def do_HEAD(self):
+            self.do_GET(head_only=True)
+
+        def do_GET(self, head_only=False):
+            log(f"=== HTTP 8081: GET {self.path} ===")
+            parsed = urllib.parse.urlparse(self.path)
+            req_path = urllib.parse.unquote(parsed.path)
+
+            if req_path.endswith('crossdomain.xml'):
+                log(f"  Serving crossdomain.xml on port 8081 for Flash ({req_path})")
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/x-cross-domain-policy')
+                self.send_header('Content-Length', str(len(CROSSDOMAIN_XML)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Headers', '*')
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(CROSSDOMAIN_XML)
+                return
+
+            file_path, clean_path = resolve_asset_file(self.path)
+            ext = os.path.splitext(clean_path)[1].lower()
+
+            if file_path and os.path.isfile(file_path):
+                try:
+                    with open(file_path, 'rb') as f:
+                        file_data = f.read()
+                    content_type = MIME_OVERRIDES.get(ext, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')
+                    self.send_response(200)
+                    self.send_header('Content-Type', content_type)
+                    self.send_header('Content-Length', str(len(file_data)))
+                    self.send_header('Accept-Ranges', 'bytes')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    if not head_only:
+                        self.wfile.write(file_data)
+                    log(f"  HTTP 8081 served file: {file_path} ({len(file_data)} bytes, {content_type})")
+                except Exception as e:
+                    log(f"  HTTP 8081 serve error: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    if not head_only:
+                        self.wfile.write(f'Serve error: {e}'.encode())
+            elif ext == '.mp3':
+                log(f"  HTTP 8081 missing MP3 ({req_path}) - serving silent MP3 fallback")
+                silent_mp3 = b'\xff\xfb\x90\xc4' + b'\x00' * 413
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/mpeg')
+                self.send_header('Content-Length', str(len(silent_mp3)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(silent_mp3)
+            else:
+                log(f"  HTTP 8081 file not found for {req_path}")
+                self.send_response(404)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(b'Not found')
+
         def log_message(self, format, *args):
             pass
 

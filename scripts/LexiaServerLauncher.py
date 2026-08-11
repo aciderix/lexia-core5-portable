@@ -213,16 +213,132 @@ def setup_asset_config():
 
 def run_http_asset_server():
     content_root = r"C:\Program Files (x86)\Lexia Core5"
-    class AssetHandler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=content_root, **kwargs)
+    appdata = os.environ.get("APPDATA", "")
+    appdata_root = os.path.join(appdata, "com.lexiareading.core5.desktop.us", "Local Store") if appdata else ""
+
+    mime_overrides = {
+        '.mp3': 'audio/mpeg',
+        '.swf': 'application/x-shockwave-flash',
+        '.xml': 'application/xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+    }
+
+    crossdomain_bytes = (
+        b'<?xml version="1.0"?>\n'
+        b'<!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd">\n'
+        b'<cross-domain-policy>\n'
+        b'  <allow-access-from domain="*" headers="*" secure="false" />\n'
+        b'  <site-control permitted-cross-domain-policies="all" />\n'
+        b'</cross-domain-policy>\n'
+    )
+
+    def resolve_asset_file(req_path):
+        import urllib.parse
+        parsed = urllib.parse.urlparse(req_path)
+        clean_path = urllib.parse.unquote(parsed.path).lstrip('/')
+        clean_win = clean_path.replace('/', os.sep)
         
-        def end_headers(self):
+        candidates = [
+            os.path.join(content_root, clean_win),
+            os.path.join(content_root, 'assets_a', clean_win),
+        ]
+        if clean_path.lower().startswith('assets_a/'):
+            stripped = clean_path[9:].replace('/', os.sep)
+            candidates.append(os.path.join(content_root, stripped))
+            candidates.append(os.path.join(content_root, 'assets_a', stripped))
+
+        if appdata_root:
+            candidates.append(os.path.join(appdata_root, clean_win))
+            candidates.append(os.path.join(appdata_root, 'assets_a', clean_win))
+            if clean_path.lower().startswith('assets_a/'):
+                stripped = clean_path[9:].replace('/', os.sep)
+                candidates.append(os.path.join(appdata_root, stripped))
+                candidates.append(os.path.join(appdata_root, 'assets_a', stripped))
+
+        for cand in candidates:
+            if os.path.isfile(cand):
+                return cand, clean_path
+
+        filename = os.path.basename(clean_win)
+        if filename:
+            for search_base in [content_root, appdata_root]:
+                if search_base and os.path.exists(search_base):
+                    for root, dirs, files in os.walk(search_base):
+                        if filename in files:
+                            return os.path.join(root, filename), clean_path
+        return None, clean_path
+
+    class AssetHandler(http.server.BaseHTTPRequestHandler):
+        def do_OPTIONS(self):
+            self.send_response(200)
             self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD')
             self.send_header('Access-Control-Allow-Headers', '*')
-            super().end_headers()
-            
-        def log_message(self, format, *args): pass
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def do_HEAD(self):
+            self.do_GET(head_only=True)
+
+        def do_GET(self, head_only=False):
+            import mimetypes
+            parsed = urllib.parse.urlparse(self.path)
+            req_path = urllib.parse.unquote(parsed.path)
+
+            if req_path.endswith('crossdomain.xml'):
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/x-cross-domain-policy')
+                self.send_header('Content-Length', str(len(crossdomain_bytes)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Headers', '*')
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(crossdomain_bytes)
+                return
+
+            file_path, clean_path = resolve_asset_file(self.path)
+            ext = os.path.splitext(clean_path)[1].lower()
+
+            if file_path and os.path.isfile(file_path):
+                try:
+                    with open(file_path, 'rb') as f:
+                        file_data = f.read()
+                    content_type = mime_overrides.get(ext, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')
+                    self.send_response(200)
+                    self.send_header('Content-Type', content_type)
+                    self.send_header('Content-Length', str(len(file_data)))
+                    self.send_header('Accept-Ranges', 'bytes')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    if not head_only:
+                        self.wfile.write(file_data)
+                except Exception as e:
+                    self.send_response(500)
+                    self.end_headers()
+                    if not head_only:
+                        self.wfile.write(f'Serve error: {e}'.encode())
+            elif ext == '.mp3':
+                silent_mp3 = b'\xff\xfb\x90\xc4' + b'\x00' * 413
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/mpeg')
+                self.send_header('Content-Length', str(len(silent_mp3)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(silent_mp3)
+            else:
+                self.send_response(404)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(b'Not found')
+
+        def log_message(self, format, *args):
+            pass
 
     try:
         httpd = http.server.HTTPServer(('0.0.0.0', 8081), AssetHandler)
