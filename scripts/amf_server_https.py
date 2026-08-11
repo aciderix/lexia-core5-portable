@@ -2,10 +2,7 @@
 """
 Mock AMFPHP server for Lexia Core5.
 Handles HTTPS AMF requests on port 443.
-Parses AMF3 requests and responds with AMF0 responses (version 0).
-
-AMF0 is simpler than AMF3 - no string tables, no traits, no references.
-This matches the original AMFPHP server behavior more closely.
+Uses pure AMF3 (version 3, body data = AMF3 array 0x09) for responses.
 """
 import http.server
 import ssl
@@ -15,7 +12,6 @@ import struct
 import datetime
 import subprocess
 import uuid
-import json
 
 LOG_FILE = "C:\\amf-log.txt"
 
@@ -45,7 +41,7 @@ def generate_self_signed_cert():
         log(f"Failed to generate cert: {e}")
         return None, None
 
-# ==================== AMF3 U29 encoding (for parsing requests) ====================
+# ==================== AMF3 U29 encoding ====================
 
 def encode_u29(value):
     if value < 0x80:
@@ -91,6 +87,55 @@ def decode_u29s_string(data, offset, string_table):
         if length > 0:
             string_table.append(s)
         return s, offset
+
+# ==================== AMF3 encoders ====================
+
+def enc_null():
+    return bytes([0x01])
+
+def enc_bool(b):
+    return bytes([0x03 if b else 0x02])
+
+def enc_int(val):
+    if val < 0 or val > 0x1FFFFFFF:
+        return enc_double(float(val))
+    return bytes([0x04]) + encode_u29(val)
+
+def enc_double(val):
+    return bytes([0x05]) + struct.pack(">d", val)
+
+def enc_string(s):
+    return bytes([0x06]) + encode_u29s_string(s)
+
+def enc_object(class_name, sealed_props, dynamic_props=None):
+    result = bytes([0x0A])
+    num_sealed = len(sealed_props)
+    is_dynamic = dynamic_props is not None
+    
+    traits_u29 = (num_sealed << 4) | (8 if is_dynamic else 0) | 3
+    result += encode_u29(traits_u29)
+    result += encode_u29s_string(class_name)
+    
+    for name, _ in sealed_props:
+        result += encode_u29s_string(name)
+    for _, value_bytes in sealed_props:
+        result += value_bytes
+    
+    if is_dynamic:
+        for name, value_bytes in dynamic_props.items():
+            result += encode_u29s_string(name)
+            result += value_bytes
+        result += bytes([0x01])  # end dynamic
+    
+    return result
+
+def enc_array(values):
+    result = bytes([0x09])
+    result += encode_u29((len(values) << 1) | 1)
+    result += bytes([0x01])  # empty string = no associative part
+    for v in values:
+        result += v
+    return result
 
 # ==================== AMF3 decoders (for parsing requests) ====================
 
@@ -238,120 +283,75 @@ def parse_body_data(data):
         results.append(value)
     return results
 
-# ==================== AMF0 encoders (for responses) ====================
-
-def amf0_str(s):
-    """AMF0 string: UI16 length + UTF-8 bytes"""
-    data = s.encode('utf-8')
-    return struct.pack(">H", len(data)) + data
-
-def amf0_null():
-    return bytes([0x05])  # null marker
-
-def amf0_bool(b):
-    return bytes([0x01, 0x01 if b else 0x00])
-
-def amf0_number(n):
-    return bytes([0x00]) + struct.pack(">d", float(n))
-
-def amf0_string(s):
-    """AMF0 string value: marker + UI16 length + UTF-8"""
-    return bytes([0x02]) + amf0_str(s)
-
-def amf0_typed_object(class_name, props):
-    """AMF0 typed object: 0x03 + class_name + key-value pairs + end"""
-    result = bytes([0x03]) + amf0_str(class_name)
-    for key, value_bytes in props:
-        result += amf0_str(key) + value_bytes
-    result += struct.pack(">H", 0)  # empty key = end of properties
-    result += bytes([0x09])  # object end marker
-    return result
-
-def amf0_ecma_array(props):
-    """AMF0 ECMA array: 0x08 + UI32 count + key-value pairs + end"""
-    result = bytes([0x08]) + struct.pack(">I", len(props))
-    for key, value_bytes in props:
-        result += amf0_str(key) + value_bytes
-    result += struct.pack(">H", 0)  # empty key
-    result += bytes([0x09])  # end
-    return result
-
-def amf0_strict_array(values):
-    """AMF0 strict array: 0x0A + UI32 count + values"""
-    return bytes([0x0A]) + struct.pack(">I", len(values)) + b''.join(values)
-
-# ==================== Response builders (AMF0) ====================
+# ==================== Response builders ====================
 
 def build_ack_message(correlation_id, body_value=None):
-    """Build AMF0 AcknowledgeMessage."""
+    """Build AMF3 AcknowledgeMessage."""
     if body_value is None:
-        body_value = amf0_null()
+        body_value = enc_null()
     
     msg_id = str(uuid.uuid4()).upper()
     
-    headers = amf0_ecma_array([
-        ("DSMessagingVersion", amf0_number(1)),
-        ("DSId", amf0_string("mock-server-001")),
-    ])
+    header_obj = enc_object("", [], {
+        "DSMessagingVersion": enc_int(1),
+        "DSId": enc_string("mock-server-001"),
+    })
     
-    props = [
-        ("correlationId", amf0_string(correlation_id)),
+    sealed = [
+        ("correlationId", enc_string(correlation_id)),
         ("body", body_value),
-        ("clientId", amf0_null()),
-        ("destination", amf0_string("")),
-        ("headers", headers),
-        ("messageId", amf0_string(msg_id)),
-        ("timestamp", amf0_number(0)),
-        ("timeToLive", amf0_number(0)),
+        ("clientId", enc_null()),
+        ("destination", enc_string("")),
+        ("headers", header_obj),
+        ("messageId", enc_string(msg_id)),
+        ("timestamp", enc_double(0)),
+        ("timeToLive", enc_int(0)),
     ]
     
-    return amf0_typed_object("flex.messaging.messages.AcknowledgeMessage", props)
+    return enc_object("flex.messaging.messages.AcknowledgeMessage", sealed)
 
 def build_handshake_vo():
-    """Build AMF0 HandshakeResponseVO: errorCode=0, errorMessage=null"""
-    return amf0_typed_object("com.lexialearning.lrs.api.HandshakeResponseVO", [
-        ("errorCode", amf0_number(0)),
-        ("errorMessage", amf0_null()),
-    ])
+    """Build HandshakeResponseVO: errorCode=0, errorMessage=null"""
+    return enc_object("com.lexialearning.lrs.api.HandshakeResponseVO", [], {
+        "errorCode": enc_double(0),
+        "errorMessage": enc_null(),
+    })
 
 def build_login_vo():
-    """Build AMF0 LoginResponseVO with fake auth."""
-    auth_token = "MOCK-AUTH-" + str(uuid.uuid4()).upper()[:8]
-    return amf0_typed_object("com.lexialearning.lrs.api.LoginResponseVO", [
-        ("authToken", amf0_string(auth_token)),
-        ("studentId", amf0_number(1)),
-        ("personName", amf0_string("Student")),
-        ("language", amf0_string("english")),
-        ("region", amf0_string("us")),
-        ("purpose", amf0_string("course")),
-        ("currentPhaseId", amf0_string("phase1")),
-        ("currentUnitIdList", amf0_strict_array([])),
-        ("isAuditMode", amf0_bool(False)),
-        ("isUnhidePassword", amf0_bool(False)),
-        ("irtForm", amf0_string("")),
-        ("startUnit", amf0_string("")),
-        ("classList", amf0_null()),
-        ("grade", amf0_string("Grade 2")),
-        ("teacher", amf0_string("Teacher")),
-        ("showWarmup", amf0_bool(False)),
-        ("secondsSinceLastLogin", amf0_number(0)),
-        ("warmupHighScore", amf0_number(0)),
-        ("errorCode", amf0_number(0)),
-        ("errorMessage", amf0_null()),
-    ])
+    """Build LoginResponseVO"""
+    auth = "MOCK-AUTH-" + str(uuid.uuid4()).upper()[:8]
+    return enc_object("com.lexialearning.lrs.api.LoginResponseVO", [], {
+        "authToken": enc_string(auth),
+        "studentId": enc_int(1),
+        "personName": enc_string("Student"),
+        "language": enc_string("english"),
+        "region": enc_string("us"),
+        "purpose": enc_string("course"),
+        "currentPhaseId": enc_string("phase1"),
+        "currentUnitIdList": enc_array([]),
+        "isAuditMode": enc_bool(False),
+        "isUnhidePassword": enc_bool(False),
+        "irtForm": enc_string(""),
+        "startUnit": enc_string(""),
+        "classList": enc_null(),
+        "grade": enc_string("Grade 2"),
+        "teacher": enc_string("Teacher"),
+        "showWarmup": enc_bool(False),
+        "secondsSinceLastLogin": enc_int(0),
+        "warmupHighScore": enc_int(0),
+        "errorCode": enc_double(0),
+        "errorMessage": enc_null(),
+    })
 
 def build_generic_vo():
-    """Build AMF0 ResponseVO: errorCode=0, errorMessage=null"""
-    return amf0_typed_object("com.lexialearning.lrs.api.ResponseVO", [
-        ("errorCode", amf0_number(0)),
-        ("errorMessage", amf0_null()),
-    ])
+    """Build generic ResponseVO"""
+    return enc_object("com.lexialearning.lrs.api.ResponseVO", [], {
+        "errorCode": enc_double(0),
+        "errorMessage": enc_null(),
+    })
 
-def build_amf0_packet(response_uri, ack_bytes, version=0):
-    """Build response packet.
-    For version 3: uses AMF0 strict array + AMF3 switch (0x11) format.
-    For version 0: uses AMF0 strict array.
-    """
+def build_response(response_uri, amf3_value, version=3):
+    """Build AMF response packet (version 3, pure AMF3 array body)."""
     packet = struct.pack(">H", version)
     packet += struct.pack(">H", 0)       # 0 headers
     packet += struct.pack(">H", 1)       # 1 body
@@ -361,124 +361,11 @@ def build_amf0_packet(response_uri, ack_bytes, version=0):
     packet += struct.pack(">H", len(target_bytes)) + target_bytes
     packet += struct.pack(">H", 0)  # empty response URI
     
-    if version == 3:
-        # AMF0 strict array wrapper + AMF3 switch for the AMF3 value
-        body_data = bytes([0x0A]) + struct.pack(">I", 1) + bytes([0x11]) + ack_bytes
-    else:
-        body_data = amf0_strict_array([ack_bytes])
-    
+    body_data = enc_array([amf3_value])
     packet += struct.pack(">I", len(body_data))
     packet += body_data
     
     return packet
-
-
-# ==================== AMF3 encoders (for version 3 responses) ====================
-
-def amf3_enc_null():
-    return bytes([0x01])
-
-def amf3_enc_bool(b):
-    return bytes([0x03 if b else 0x02])
-
-def amf3_enc_int(val):
-    if val < 0 or val > 0x1FFFFFFF:
-        return amf3_enc_double(float(val))
-    return bytes([0x04]) + encode_u29(val)
-
-def amf3_enc_double(val):
-    return bytes([0x05]) + struct.pack(">d", val)
-
-def amf3_enc_string(s):
-    return bytes([0x06]) + encode_u29s_string(s)
-
-def amf3_enc_object(class_name, sealed_props, dynamic_props=None):
-    """Encode AMF3 object with sealed or dynamic traits."""
-    result = bytes([0x0A])
-    num_sealed = len(sealed_props)
-    is_dynamic = dynamic_props is not None
-    
-    traits_u29 = (num_sealed << 4) | (8 if is_dynamic else 0) | 3
-    result += encode_u29(traits_u29)
-    result += encode_u29s_string(class_name)
-    
-    for name, _ in sealed_props:
-        result += encode_u29s_string(name)
-    for _, value_bytes in sealed_props:
-        result += value_bytes
-    
-    if is_dynamic:
-        for name, value_bytes in dynamic_props.items():
-            result += encode_u29s_string(name)
-            result += value_bytes
-        result += bytes([0x01])  # end dynamic
-    
-    return result
-
-def amf3_enc_array(values):
-    result = bytes([0x09])
-    result += encode_u29((len(values) << 1) | 1)
-    result += bytes([0x01])
-    for v in values:
-        result += v
-    return result
-
-def build_amf3_ack_message(correlation_id, body_value=None):
-    """Build AMF3 AcknowledgeMessage."""
-    if body_value is None:
-        body_value = amf3_enc_null()
-    
-    msg_id = str(uuid.uuid4()).upper()
-    
-    header_obj = amf3_enc_object("", [], {
-        "DSMessagingVersion": amf3_enc_int(1),
-        "DSId": amf3_enc_string("mock-server-001"),
-    })
-    
-    sealed = [
-        ("correlationId", amf3_enc_string(correlation_id)),
-        ("body", body_value),
-        ("clientId", amf3_enc_null()),
-        ("destination", amf3_enc_string("")),
-        ("headers", header_obj),
-        ("messageId", amf3_enc_string(msg_id)),
-        ("timestamp", amf3_enc_double(0)),
-        ("timeToLive", amf3_enc_int(0)),
-    ]
-    
-    return amf3_enc_object("flex.messaging.messages.AcknowledgeMessage", sealed)
-
-def build_amf3_handshake_vo():
-    return amf3_enc_object("com.lexialearning.lrs.api.HandshakeResponseVO", [], {
-        "errorCode": amf3_enc_double(0),
-        "errorMessage": amf3_enc_null(),
-    })
-
-def build_amf3_login_vo():
-    auth = "MOCK-AUTH-" + str(uuid.uuid4()).upper()[:8]
-    return amf3_enc_object("com.lexialearning.lrs.api.LoginResponseVO", [], {
-        "authToken": amf3_enc_string(auth),
-        "studentId": amf3_enc_int(1),
-        "personName": amf3_enc_string("Student"),
-        "language": amf3_enc_string("english"),
-        "region": amf3_enc_string("us"),
-        "purpose": amf3_enc_string("course"),
-        "currentPhaseId": amf3_enc_string("phase1"),
-        "currentUnitIdList": amf3_enc_array([]),
-        "isAuditMode": amf3_enc_bool(False),
-        "isUnhidePassword": amf3_enc_bool(False),
-        "irtForm": amf3_enc_string(""),
-        "startUnit": amf3_enc_string(""),
-        "classList": amf3_enc_null(),
-        "grade": amf3_enc_string("Grade 2"),
-        "teacher": amf3_enc_string("Teacher"),
-        "showWarmup": amf3_enc_bool(False),
-        "secondsSinceLastLogin": amf3_enc_int(0),
-        "warmupHighScore": amf3_enc_int(0),
-        "errorCode": amf3_enc_double(0),
-        "errorMessage": amf3_enc_null(),
-    })
-
 
 # ==================== HTTP Handler ====================
 
@@ -503,7 +390,6 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
                 messages = parse_body_data(b['data'])
                 
                 for msg in messages:
-                    # The message might be wrapped in array key [0]
                     if isinstance(msg, dict) and '[0]' in msg and '__class__' not in msg:
                         msg = msg['[0]']
                     
@@ -515,16 +401,15 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
                         msg_id = msg.get('messageId', '')
                         log(f"  CommandMessage operation={operation}, messageId={msg_id}")
                         
-                        # CONNECT → AMF3 ack with null body (version 3 + AMF0 wrapper + AMF3 switch)
-                        ack = build_amf3_ack_message(msg_id)
-                        resp = build_amf0_packet(b['response'], ack, version=3)
+                        ack = build_ack_message(msg_id)
+                        resp = build_response(b['response'], ack)
                         
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/x-amf')
                         self.send_header('Content-Length', len(resp))
                         self.end_headers()
                         self.wfile.write(resp)
-                        log(f"  Sent AMF3 AcknowledgeMessage for CONNECT ({len(resp)} bytes)")
+                        log(f"  Sent AcknowledgeMessage for CONNECT ({len(resp)} bytes)")
                         log(f"  Response hex: {resp.hex()}")
                         return
                     
@@ -538,63 +423,59 @@ class AMFHandler(http.server.BaseHTTPRequestHandler):
                         log(f"  Body: {msg_body}")
                         
                         if operation == 'handshake':
-                            vo = build_amf3_handshake_vo()
-                            ack = build_amf3_ack_message(msg_id, vo)
-                            resp = build_amf0_packet(b['response'], ack, version=3)
+                            vo = build_handshake_vo()
+                            ack = build_ack_message(msg_id, vo)
+                            resp = build_response(b['response'], ack)
                             
                             self.send_response(200)
                             self.send_header('Content-Type', 'application/x-amf')
                             self.send_header('Content-Length', len(resp))
                             self.end_headers()
                             self.wfile.write(resp)
-                            log(f"  Sent AMF3 HandshakeResponseVO ({len(resp)} bytes)")
+                            log(f"  Sent HandshakeResponseVO ({len(resp)} bytes)")
                             log(f"  Response hex: {resp.hex()}")
                             return
                         
                         elif operation == 'login':
-                            vo = build_amf3_login_vo()
-                            ack = build_amf3_ack_message(msg_id, vo)
-                            resp = build_amf0_packet(b['response'], ack, version=3)
+                            vo = build_login_vo()
+                            ack = build_ack_message(msg_id, vo)
+                            resp = build_response(b['response'], ack)
                             
                             self.send_response(200)
                             self.send_header('Content-Type', 'application/x-amf')
                             self.send_header('Content-Length', len(resp))
                             self.end_headers()
                             self.wfile.write(resp)
-                            log(f"  Sent AMF3 LoginResponseVO ({len(resp)} bytes)")
+                            log(f"  Sent LoginResponseVO ({len(resp)} bytes)")
                             log(f"  Response hex: {resp.hex()}")
                             return
                         
                         else:
-                            vo = amf3_enc_object("com.lexialearning.lrs.api.ResponseVO", [], {
-                                "errorCode": amf3_enc_double(0),
-                                "errorMessage": amf3_enc_null(),
-                            })
-                            ack = build_amf3_ack_message(msg_id, vo)
-                            resp = build_amf0_packet(b['response'], ack, version=3)
+                            vo = build_generic_vo()
+                            ack = build_ack_message(msg_id, vo)
+                            resp = build_response(b['response'], ack)
                             self.send_response(200)
                             self.send_header('Content-Type', 'application/x-amf')
                             self.send_header('Content-Length', len(resp))
                             self.end_headers()
                             self.wfile.write(resp)
-                            log(f"  Sent AMF3 generic ResponseVO for {operation} ({len(resp)} bytes)")
+                            log(f"  Sent generic ResponseVO for {operation} ({len(resp)} bytes)")
                             log(f"  Response hex: {resp.hex()}")
                             return
                     
                     else:
                         log(f"  Unknown message type: {class_name}")
                         msg_id = msg.get('messageId', '') if isinstance(msg, dict) else ''
-                        ack = build_amf3_ack_message(msg_id)
-                        resp = build_amf0_packet(b['response'], ack, version=3)
+                        ack = build_ack_message(msg_id)
+                        resp = build_response(b['response'], ack)
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/x-amf')
                         self.send_header('Content-Length', len(resp))
                         self.end_headers()
                         self.wfile.write(resp)
-                        log(f"  Sent AMF3 generic ack ({len(resp)} bytes)")
+                        log(f"  Sent generic ack ({len(resp)} bytes)")
                         return
             
-            # Fallback
             resp = b'{"success":true}'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -625,7 +506,7 @@ def main():
     with open(LOG_FILE, "w") as f:
         f.write(f"AMF Mock Server starting at {datetime.datetime.now().isoformat()}\n")
     
-    log("AMF Mock Server (HTTPS, AMF0 responses) starting on port 443...")
+    log("AMF Mock Server (HTTPS, pure AMF3) starting on port 443...")
     cert_file, key_file = generate_self_signed_cert()
     
     if cert_file and os.path.exists(cert_file) and os.path.exists(key_file):
