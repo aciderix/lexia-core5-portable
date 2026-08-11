@@ -7,6 +7,7 @@ Does NOT touch the AMF content - PHP/AMFPHP handles all encoding.
 import http.server
 import ssl
 import os
+import sys
 import subprocess
 import datetime
 import urllib.request
@@ -39,7 +40,8 @@ def generate_self_signed_cert():
         log(f"Failed to generate cert: {e}")
         return None, None
 
-PHP_BACKEND = "http://127.0.0.1:8080/index.php"
+# AMFPHP 2.x gateway - index.php is in the Amfphp subdirectory
+PHP_BACKEND = "http://127.0.0.1:8080/Amfphp/index.php"
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
@@ -48,7 +50,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         
         log(f"=== PROXY: POST {self.path} ({content_length} bytes) -> {PHP_BACKEND} ===")
         
-        # Forward to PHP/AMFPHP backend
         req = urllib.request.Request(
             PHP_BACKEND,
             data=post_data,
@@ -69,8 +70,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(res_data)
                 log(f"  PHP responded: {len(res_data)} bytes, type={response.headers.get('Content-Type')}")
                 log(f"  Response hex (first 100): {res_data[:100].hex()}")
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8', errors='replace') if e.fp else ''
+            log(f"  PHP HTTP ERROR {e.code}: {e.reason}")
+            log(f"  PHP error body: {error_body[:500]}")
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(b'Proxy error: PHP backend error')
         except urllib.error.URLError as e:
-            log(f"  PHP ERROR: {e}")
+            log(f"  PHP URL ERROR: {e}")
             self.send_response(502)
             self.end_headers()
             self.wfile.write(b'Proxy error: PHP backend unavailable')
@@ -112,7 +120,7 @@ def main():
         context.load_cert_chain(cert_file, key_file)
         server = http.server.HTTPServer(('0.0.0.0', 443), ProxyHandler)
         server.socket = context.wrap_socket(server.socket, server_side=True)
-        log("Proxy listening on https://0.0.0.0:443 -> http://127.0.0.1:8080")
+        log("Proxy listening on https://0.0.0.0:443 -> " + PHP_BACKEND)
         server.serve_forever()
     else:
         log("ERROR: Could not generate SSL certificate.")
