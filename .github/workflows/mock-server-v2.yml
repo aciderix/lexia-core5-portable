@@ -140,7 +140,7 @@ jobs:
             Get-Content $xmlFile | Select-Object -First 80
           }
 
-      - name: Decompile SWF with JPEXS Flash Decompiler
+      - name: Decompile SWF and dump key files
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
@@ -152,89 +152,88 @@ jobs:
           Invoke-WebRequest -Uri $ffdecUrl -OutFile "C:\ffdec.zip" -MaximumRedirection 5
           Expand-Archive -Path "C:\ffdec.zip" -DestinationPath "C:\ffdec" -Force
           $ffdecJar = Get-ChildItem "C:\ffdec" -Filter "ffdec.jar" -Recurse | Select-Object -First 1
-          Write-Host "FFDEC jar: $($ffdecJar.FullName)"
           
           # Check if Java is available
           $java = Get-Command java -ErrorAction SilentlyContinue
           if (-not $java) {
-            Write-Host "Java not found, installing..."
             choco install openjdk17 -y --no-progress 2>$null
             $env:JAVA_HOME = "C:\Program Files\OpenJDK\openjdk-17"
             $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
           }
-          java -version 2>&1
           
-          # Decompile the SWF - export ActionScript source
+          # Decompile the SWF
           Write-Host "Decompiling SWF..."
           $exportDir = "C:\swf_decompiled"
           New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
-          
-          # Export all ActionScript code
           & java -jar $ffdecJar.FullName -export script $exportDir $swf 2>&1 | Out-Null
           
-          Write-Host "=== Searching for CONTENT_URL usage ==="
-          $scripts = Get-ChildItem $exportDir -Recurse -Filter "*.as" -ErrorAction SilentlyContinue
-          Write-Host "Found $($scripts.Count) ActionScript files"
+          # Dump full SoundTask.as
+          Write-Host "========== FULL SoundTask.as =========="
+          $soundTask = Get-ChildItem $exportDir -Recurse -Filter "SoundTask.as" | Select-Object -First 1
+          if ($soundTask) { Get-Content $soundTask.FullName | ForEach-Object { Write-Host $_ } }
           
-          foreach ($f in $scripts) {
-            $c = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-            if ($c -match 'CONTENT_URL|contentUrl|contentURL') {
-              Write-Host "=== FOUND in: $($f.FullName) ==="
-              $lines = Get-Content $f.FullName
-              for ($i = 0; $i -lt $lines.Count; $i++) {
-                if ($lines[$i] -match 'CONTENT_URL|contentUrl|contentURL') {
-                  $start = [Math]::Max(0, $i - 5)
-                  $end = [Math]::Min($lines.Count - 1, $i + 10)
-                  Write-Host "  Lines ${start}-${end}:"
-                  for ($j = $start; $j -le $end; $j++) {
-                    Write-Host "    ${j}: $($lines[$j])"
-                  }
-                }
-              }
-            }
-          }
+          # Dump full URLHelper.as
+          Write-Host "========== FULL URLHelper.as =========="
+          $urlHelper = Get-ChildItem $exportDir -Recurse -Filter "URLHelper.as" | Select-Object -First 1
+          if ($urlHelper) { Get-Content $urlHelper.FullName | ForEach-Object { Write-Host $_ } }
           
-          Write-Host "=== Searching for SoundTask ==="
-          foreach ($f in $scripts) {
-            $c = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-            if ($c -match 'SoundTask') {
-              Write-Host "=== FOUND SoundTask in: $($f.FullName) ==="
-              $lines = Get-Content $f.FullName
-              for ($i = 0; $i -lt $lines.Count; $i++) {
-                if ($lines[$i] -match 'SoundTask') {
-                  $start = [Math]::Max(0, $i - 3)
-                  $end = [Math]::Min($lines.Count - 1, $i + 15)
-                  Write-Host "  Lines ${start}-${end}:"
-                  for ($j = $start; $j -le $end; $j++) {
-                    Write-Host "    $($lines[$j])"
-                  }
-                }
-              }
-            }
-          }
+          # Dump full MediaManager.as
+          Write-Host "========== FULL MediaManager.as =========="
+          $mediaMgr = Get-ChildItem $exportDir -Recurse -Filter "MediaManager.as" | Select-Object -First 1
+          if ($mediaMgr) { Get-Content $mediaMgr.FullName | ForEach-Object { Write-Host $_ } }
           
-          Write-Host "=== Searching for asset/content path construction ==="
-          foreach ($f in $scripts) {
-            $c = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-            if ($c -match 'ASSET_MANIFEST|AssetManifest|getContentUrl|contentBase|assetBase|contentRoot|assetRoot') {
-              Write-Host "=== FOUND in: $($f.FullName) ==="
-              $lines = Get-Content $f.FullName
-              for ($i = 0; $i -lt $lines.Count; $i++) {
-                if ($lines[$i] -match 'ASSET_MANIFEST|AssetManifest|getContentUrl|contentBase|assetBase|contentRoot|assetRoot') {
-                  $start = [Math]::Max(0, $i - 3)
-                  $end = [Math]::Min($lines.Count - 1, $i + 10)
-                  for ($j = $start; $j -le $end; $j++) {
-                    Write-Host "    $($lines[$j])"
-                  }
-                }
-              }
-            }
-          }
+          # Dump full PortalDesktop.as (first 250 lines)
+          Write-Host "========== PortalDesktop.as (first 250 lines) =========="
+          $portalDesktop = Get-ChildItem $exportDir -Recurse -Filter "PortalDesktop.as" | Select-Object -First 1
+          if ($portalDesktop) { Get-Content $portalDesktop.FullName | Select-Object -First 250 | ForEach-Object { Write-Host $_ } }
           
-          Write-Host "=== Exercise XML full content ==="
+          # Dump full SoundTaskModel.as
+          Write-Host "========== FULL SoundTaskModel.as =========="
+          $soundTaskModel = Get-ChildItem $exportDir -Recurse -Filter "SoundTaskModel.as" | Select-Object -First 1
+          if ($soundTaskModel) { Get-Content $soundTaskModel.FullName | ForEach-Object { Write-Host $_ } }
+          
+          # Dump full MediaModel.as
+          Write-Host "========== FULL MediaModel.as =========="
+          $mediaModel = Get-ChildItem $exportDir -Recurse -Filter "MediaModel.as" | Select-Object -First 1
+          if ($mediaModel) { Get-Content $mediaModel.FullName | ForEach-Object { Write-Host $_ } }
+          
+          # Dump full MediaCollection.as
+          Write-Host "========== FULL MediaCollection.as =========="
+          $mediaColl = Get-ChildItem $exportDir -Recurse -Filter "MediaCollection.as" | Select-Object -First 1
+          if ($mediaColl) { Get-Content $mediaColl.FullName | ForEach-Object { Write-Host $_ } }
+          
+          # Dump full exercise XML
+          Write-Host "========== FULL Exercise XML =========="
           $xmlFile = "$lexiaDir\assets_a\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
-          if (Test-Path $xmlFile) {
-            Get-Content $xmlFile
+          if (Test-Path $xmlFile) { Get-Content $xmlFile | ForEach-Object { Write-Host $_ } }
+          
+          # Check for setup/properties files
+          Write-Host "========== Setup/Properties files =========="
+          Get-ChildItem $lexiaDir -Filter "*.properties" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { 
+            Write-Host "--- $($_.FullName) ---"
+            Get-Content $_.FullName | ForEach-Object { Write-Host $_ }
+          }
+          Get-ChildItem $lexiaDir -Filter "setup*" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { 
+            Write-Host "--- $($_.FullName) ---"
+            Get-Content $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+          }
+          
+          # Check AIR application descriptor
+          Write-Host "========== AIR app descriptor =========="
+          $airXml = Get-ChildItem $lexiaDir -Filter "application.xml" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($airXml) { Get-Content $airXml.FullName | ForEach-Object { Write-Host $_ } }
+          
+          # Check how app is launched
+          Write-Host "========== App exe and config =========="
+          Get-ChildItem $lexiaDir -Filter "*.exe" | ForEach-Object { Write-Host "EXE: $($_.Name) ($($_.Length) bytes)" }
+          Get-ChildItem $lexiaDir -Filter "*.xml" | Select-Object Name, Length | Format-Table
+          
+          # Check AppData for any setup files
+          $appData = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
+          Write-Host "========== AppData setup files =========="
+          Get-ChildItem $appData -Filter "*.properties" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "--- $($_.FullName) ---"
+            Get-Content $_.FullName | ForEach-Object { Write-Host $_ }
           }
           
       - name: Setup hosts redirect and proxy
