@@ -384,9 +384,9 @@ jobs:
           Start-Sleep -Seconds 5
           TakeScreenshot "10-level01-menu.png"
 
-          # STEP 10: Click Rhyming activity card (relX=291, relY=375)
-          Write-Host "=== Clicking Rhyming activity card ==="
-          ClickAt 291 375 "Rhyming activity card"
+          # STEP 10: Click Rhyming activity card top icon (relX=291, relY=260)
+          Write-Host "=== Clicking Rhyming activity card top icon ==="
+          ClickAt 291 260 "Rhyming activity top icon"
           Start-Sleep -Seconds 5
           TakeScreenshot "11-after-rhyming-click.png"
 
