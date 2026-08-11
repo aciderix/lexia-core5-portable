@@ -140,56 +140,89 @@ jobs:
             Get-Content $xmlFile | Select-Object -First 80
           }
 
-      - name: Inspect AIR config and search for content paths
+      - name: Read AIR config and content XML
         shell: pwsh
         run: |
           $lexiaDir = "C:\Program Files (x86)\Lexia Core5"
           
-          Write-Host "=== META-INF contents ==="
-          Get-ChildItem "$lexiaDir\META-INF" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
-          
-          Write-Host "=== AIR application descriptor ==="
-          $airXml = Get-ChildItem "$lexiaDir\META-INF" -Filter "*.xml" -ErrorAction SilentlyContinue
-          foreach ($f in $airXml) {
-            Write-Host "--- $($f.Name) ---"
-            Get-Content $f.FullName
+          Write-Host "=== AIR application.xml ==="
+          $appXml = "$lexiaDir\META-INF\AIR\application.xml"
+          if (Test-Path $appXml) {
+            Get-Content $appXml
           }
           
-          Write-Host "=== Config/settings XML files ==="
-          $configFiles = Get-ChildItem $lexiaDir -Filter "*.xml" -Recurse -Depth 1 -ErrorAction SilentlyContinue
-          $configFiles | Select-Object FullName, Length | Format-Table -AutoSize
-          foreach ($f in $configFiles) {
-            Write-Host "--- $($f.Name) ---"
-            Get-Content $f.FullName | Select-Object -First 30
+          Write-Host "=== us_a.xml (content config) - first 100 lines ==="
+          $usXml = "$lexiaDir\assets_a\us_a.xml"
+          if (Test-Path $usXml) {
+            Get-Content $usXml | Select-Object -First 100
           }
           
-          Write-Host "=== Search for content path in all XML files ==="
-          $allXml = Get-ChildItem $lexiaDir -Filter "*.xml" -Recurse -ErrorAction SilentlyContinue
-          foreach ($f in $allXml) {
-            $content = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-            if ($content -match 'contentPath|assetPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|mediaUrl|audioPath|soundPath|contentDir|assetDir') {
-              Write-Host "FOUND in: $($f.FullName)"
-              $content | Select-String -Pattern 'contentPath|assetPath|contentUrl|cdnUrl|assetUrl|baseDir|contentBase|mediaUrl|audioPath|soundPath|contentDir|assetDir' -AllMatches | Select-Object -First 5
-            }
+          Write-Host "=== Search us_a.xml for audio/sound/media ==="
+          if (Test-Path $usXml) {
+            $content = Get-Content $usXml -Raw
+            $content | Select-String -Pattern 'audio|sound|media|mp3|path|dir|base|url' -AllMatches | Select-Object -First 20
           }
           
-          Write-Host "=== Search for content path in all JSON/config files ==="
-          $jsonFiles = Get-ChildItem $lexiaDir -Filter "*.json" -Recurse -ErrorAction SilentlyContinue
-          $jsonFiles | Select-Object FullName | Format-Table -AutoSize
+          Write-Host "=== Full PortalDesktop.log ==="
+          $logPath = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store\#SharedObjects\PortalDesktop.swf\CORE5.sol"
+          # Check for log files
+          $logFiles = Get-ChildItem "$env:APPDATA\com.lexiareading.core5.desktop.us" -Recurse -ErrorAction SilentlyContinue
+          $logFiles | Select-Object FullName, Length | Format-Table -AutoSize
           
-          Write-Host "=== Exercise SWF files for bascateg ==="
-          Get-ChildItem "$lexiaDir\assets_a\graphics\a01_bascateg" -Filter "*.swf" -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
+          Write-Host "=== Python SWF string extraction ==="
+          # Install Python and use it to decompress SWF and extract strings
+          $swf = "$lexiaDir\PortalDesktop.swf"
+          $pyScript = @'
+          import zlib, re, sys
+          with open(sys.argv[1], "rb") as f:
+              data = f.read()
+          header = data[:3]
+          print(f"SWF header: {header}")
+          if header == b"CWS":
+              # CWS: first 8 bytes are header, rest is zlib compressed
+              try:
+                  decompressed = zlib.decompress(data[8:])
+                  print(f"Decompressed: {len(decompressed)} bytes")
+              except:
+                  # Try skipping just 2 bytes after CWS + version + length
+                  try:
+                      decompressed = zlib.decompress(data[8:])
+                      print(f"Decompressed alt: {len(decompressed)} bytes")
+                  except Exception as e:
+                      print(f"Decompress error: {e}")
+                      # Try raw inflate
+                      import io
+                      decomp_obj = zlib.decompressobj()
+                      decompressed = decomp_obj.decompress(data[8:])
+                      print(f"Decompressed (raw): {len(decompressed)} bytes")
+          elif header == b"FWS":
+              decompressed = data
+          else:
+              print(f"Unknown header: {header}")
+              sys.exit(1)
           
-          Write-Host "=== AppData after run - .sol files ==="
+          # Extract all ASCII strings >= 6 chars
+          strings = re.findall(rb"[\x20-\x7e]{6,}", decompressed)
+          # Filter for relevant keywords
+          keywords = [b"content", b"asset", b"audio", b"sound", b"path", b"url", b"media",
+                      b"base", b"dir", b"cdn", b"resolve", b"File", b"app:/", b"app-storage",
+                      b"URLRequest", b"loadSound", b"SoundTask", b"onMediaError", b"mp3"]
+          found = set()
+          for s in strings:
+              for kw in keywords:
+                  if kw.lower() in s.lower():
+                      found.add(s.decode("ascii", errors="replace"))
+          
+          print(f"\n=== Found {len(found)} matching strings ===")
+          for s in sorted(found)[:80]:
+              print(s)
+          '@
+          $pyScript | Out-File -FilePath "C:\swf_extract.py" -Encoding utf8
+          python C:\swf_extract.py "$swf" 2>&1
+          
+          Write-Host "=== .sol files search ==="
           Get-ChildItem "$env:APPDATA" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
-          
-          Write-Host "=== AppData full listing ==="
-          $appDataDir = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
-          if (Test-Path $appDataDir) {
-            Get-ChildItem $appDataDir -Recurse -ErrorAction SilentlyContinue | Select-Object FullName -First 30 | Format-Table -AutoSize
-          } else {
-            Write-Host "AppData dir not found"
-          }
+          Get-ChildItem "C:\Users" -Recurse -Filter "*.sol" -ErrorAction SilentlyContinue -Depth 5 | Select-Object FullName, Length | Format-Table -AutoSize
 
       - name: Setup hosts redirect and proxy
         shell: pwsh
