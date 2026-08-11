@@ -1,6 +1,7 @@
 name: Mock Server Test
 
 on:
+  push:
   workflow_dispatch:
 
 jobs:
@@ -257,23 +258,19 @@ jobs:
           # app:/ and file:/// don't trigger this event -> Error #2032
           # Using HTTPS makes OSMF send GET requests through the proxy, which
           # serves local files with proper HTTP 200 status
-          Write-Host "=== Fixing exercise XML dir attribute ==="
-          $xmlFile = "$assetsDir\xml_us\a01_bascateg\us_a01_bascateg_01.xml"
-          if (Test-Path $xmlFile) {
-            $dirValue = "https://student.mylexia.com/assets_a/"
-            Write-Host "  Using dir=$dirValue"
-            $xml = Get-Content $xmlFile -Raw
-            $replacePattern = 'dir="../../"'
-            $replaceValue = 'dir="' + $dirValue + '"'
-            $xml = $xml -replace $replacePattern, $replaceValue
-            Set-Content -Path $xmlFile -Value $xml -NoNewline -Encoding UTF8
-            Write-Host "  Fixed dir attribute in $xmlFile"
-            # Verify
-            $first10 = Get-Content $xmlFile | Select-Object -First 3
-            $first10 | ForEach-Object { Write-Host "  $_" }
-          } else {
-            Write-Host "  XML file not found!"
+          Write-Host "=== Fixing exercise XML dir attribute (all XML files) ==="
+          $dirValue = "https://student.mylexia.com/assets_a/"
+          $xmlFiles = Get-ChildItem -Path "$assetsDir\xml_us" -Recurse -Filter "*.xml" -ErrorAction SilentlyContinue
+          $fixedCount = 0
+          foreach ($f in $xmlFiles) {
+            $xml = Get-Content $f.FullName -Raw
+            if ($xml -match 'dir="\.\./\.\./"') {
+              $xml = $xml -replace 'dir="\.\./\.\./"', ('dir="' + $dirValue + '"')
+              Set-Content -Path $f.FullName -Value $xml -NoNewline -Encoding UTF8
+              $fixedCount++
+            }
           }
+          Write-Host "  Fixed dir attribute in $fixedCount / $($xmlFiles.Count) XML files"
           
           # APPROACH 3: Fix PHP 8 each() compatibility
           # The regex needs to match while(list($k, $v) = each($arr))

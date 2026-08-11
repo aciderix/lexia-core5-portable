@@ -202,5 +202,49 @@ class AMFClient {
         $response->errorMessage = null;
         return $response;
     }
+
+    /**
+     * Step end - called when a step in a unit completes
+     */
+    public function stepEnd($req = null) {
+        $response = new stdClass();
+        $response->_explicitType = 'com.lexialearning.lrs.api.StepEndResponseVO';
+        $response->errorCode = 0;
+        $response->errorMessage = null;
+        return $response;
+    }
+
+    /**
+     * Save unit data - called to persist unit state
+     */
+    public function saveUnitData($req = null) {
+        $response = new stdClass();
+        $response->_explicitType = 'com.lexialearning.lrs.api.ResponseVO';
+        $response->errorCode = 0;
+        $response->errorMessage = null;
+        return $response;
+    }
+
+    /**
+     * Save warmup score - called after warmup game
+     */
+    public function saveWarmupScore($req = null) {
+        $response = new stdClass();
+        $response->_explicitType = 'com.lexialearning.lrs.api.SaveWarmupScoreResponseVO';
+        $response->errorCode = 0;
+        $response->errorMessage = null;
+        return $response;
+    }
+
+    /**
+     * Reset student - admin reset
+     */
+    public function resetStudent($req = null) {
+        $response = new stdClass();
+        $response->_explicitType = 'com.lexialearning.lrs.api.ResponseVO';
+        $response->errorCode = 0;
+        $response->errorMessage = null;
+        return $response;
+    }
 }
 ?>
