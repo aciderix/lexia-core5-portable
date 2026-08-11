@@ -1,6 +1,7 @@
 name: Build Lexia Core5 Portable
 
 "on":
+  push:
   workflow_dispatch:
     inputs:
       mode:

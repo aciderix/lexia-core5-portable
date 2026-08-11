@@ -57,7 +57,27 @@ MIME_OVERRIDES = {
     '.gif': 'image/gif',
 }
 
+CROSSDOMAIN_XML = (
+    b'<?xml version="1.0"?>\n'
+    b'<!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd">\n'
+    b'<cross-domain-policy>\n'
+    b'  <allow-access-from domain="*" headers="*" secure="false" />\n'
+    b'  <site-control permitted-cross-domain-policies="all" />\n'
+    b'</cross-domain-policy>\n'
+)
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def do_HEAD(self):
+        self.do_GET(head_only=True)
+
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
@@ -80,6 +100,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header('Content-Type', response.headers.get('Content-Type', 'application/x-amf'))
                 self.send_header('Content-Length', len(res_data))
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(res_data)
                 log(f"  PHP responded: {len(res_data)} bytes, type={response.headers.get('Content-Type')}")
@@ -102,29 +123,41 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f'Proxy error: {e}'.encode())
     
-    def do_GET(self):
+    def do_GET(self, head_only=False):
         log(f"=== PROXY: GET {self.path} ===")
         
         # Parse the path
         parsed = urllib.parse.urlparse(self.path)
         req_path = urllib.parse.unquote(parsed.path)
         
+        # Flash crossdomain.xml request
+        if req_path in ('/crossdomain.xml', 'crossdomain.xml'):
+            log("  Serving crossdomain.xml for Flash Security Policy")
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/x-cross-domain-policy')
+            self.send_header('Content-Length', str(len(CROSSDOMAIN_XML)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(CROSSDOMAIN_XML)
+            return
+
         # Skip AMF gateway requests
         if req_path.startswith('/clientapi/'):
             resp = b'{"status":"ok","proxy":"running"}'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', len(resp))
+            self.send_header('Content-Length', str(len(resp)))
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(resp)
+            if not head_only:
+                self.wfile.write(resp)
             return
         
         # Try to serve content files from the local filesystem
         # Remove leading slash and join with content root
-        if req_path.startswith('/'):
-            req_path = req_path[1:]
-        
-        file_path = os.path.join(CONTENT_ROOT, req_path.replace('/', '\\'))
+        clean_path = req_path[1:] if req_path.startswith('/') else req_path
+        file_path = os.path.join(CONTENT_ROOT, clean_path.replace('/', '\\'))
         
         if os.path.isfile(file_path):
             try:
@@ -136,22 +169,27 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 
                 self.send_response(200)
                 self.send_header('Content-Type', content_type)
-                self.send_header('Content-Length', len(file_data))
+                self.send_header('Content-Length', str(len(file_data)))
+                self.send_header('Accept-Ranges', 'bytes')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(file_data)
+                if not head_only:
+                    self.wfile.write(file_data)
                 log(f"  Served file: {file_path} ({len(file_data)} bytes, {content_type})")
             except Exception as e:
                 log(f"  File serve error: {e}")
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f'File serve error: {e}'.encode())
+                if not head_only:
+                    self.wfile.write(f'File serve error: {e}'.encode())
         else:
             log(f"  File not found: {file_path}")
             self.send_response(404)
             self.send_header('Content-Type', 'text/plain')
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(b'Not found')
+            if not head_only:
+                self.wfile.write(b'Not found')
     
     def log_message(self, format, *args):
         pass
