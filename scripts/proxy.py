@@ -66,65 +66,6 @@ CROSSDOMAIN_XML = (
     b'</cross-domain-policy>\n'
 )
 
-class ProxyHandler(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD')
-        self.send_header('Access-Control-Allow-Headers', '*')
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
-    def do_HEAD(self):
-        self.do_GET(head_only=True)
-
-    def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length)
-        
-        log(f"=== PROXY: POST {self.path} ({content_length} bytes) -> {PHP_BACKEND} ===")
-        
-        req = urllib.request.Request(
-            PHP_BACKEND,
-            data=post_data,
-            headers={
-                'Content-Type': self.headers.get('Content-Type', 'application/x-amf'),
-                'Content-Length': str(content_length),
-            },
-            method='POST'
-        )
-        
-        try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                res_data = response.read()
-                self.send_response(200)
-                self.send_header('Content-Type', response.headers.get('Content-Type', 'application/x-amf'))
-                self.send_header('Content-Length', len(res_data))
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(res_data)
-                log(f"  PHP responded: {len(res_data)} bytes, type={response.headers.get('Content-Type')}")
-                log(f"  Response hex (first 100): {res_data[:100].hex()}")
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8', errors='replace') if e.fp else ''
-            log(f"  PHP HTTP ERROR {e.code}: {e.reason}")
-            log(f"  PHP error body: {error_body[:500]}")
-            self.send_response(502)
-            self.end_headers()
-            self.wfile.write(b'Proxy error: PHP backend error')
-        except urllib.error.URLError as e:
-            log(f"  PHP URL ERROR: {e}")
-            self.send_response(502)
-            self.end_headers()
-            self.wfile.write(b'Proxy error: PHP backend unavailable')
-        except Exception as e:
-            log(f"  PROXY ERROR: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(f'Proxy error: {e}'.encode())
-    
 def resolve_asset_file(req_path):
     parsed = urllib.parse.urlparse(req_path)
     clean_path = urllib.parse.unquote(parsed.path).lstrip('/')
@@ -170,6 +111,8 @@ def resolve_asset_file(req_path):
     return None, clean_path
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -322,6 +265,8 @@ import threading
 
 def run_http_asset_server():
     class AssetHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def do_OPTIONS(self):
             self.send_response(200)
             self.send_header('Access-Control-Allow-Origin', '*')
