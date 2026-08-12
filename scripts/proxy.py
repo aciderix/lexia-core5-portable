@@ -146,7 +146,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header('Content-Type', response.headers.get('Content-Type', 'application/x-amf'))
                 self.send_header('Content-Length', str(len(res_data)))
-                self.send_header('Connection', 'close')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(res_data)
@@ -223,7 +222,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(status_code)
                 self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(file_data)))
-                self.send_header('Connection', 'close')
                 if status_code == 206:
                     self.send_header('Content-Range', f'bytes {start}-{end}/{total_size}')
                 self.send_header('Accept-Ranges', 'bytes')
@@ -244,7 +242,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'audio/mpeg')
             self.send_header('Content-Length', str(len(silent_mp3)))
-            self.send_header('Connection', 'close')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             if not head_only:
