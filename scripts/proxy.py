@@ -67,6 +67,8 @@ CROSSDOMAIN_XML = (
 )
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -200,7 +202,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 res_data = response.read()
                 self.send_response(200)
                 self.send_header('Content-Type', response.headers.get('Content-Type', 'application/x-amf'))
-                self.send_header('Content-Length', len(res_data))
+                self.send_header('Content-Length', str(len(res_data)))
+                self.send_header('Connection', 'close')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(res_data)
@@ -226,6 +229,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     
     def do_GET(self, head_only=False):
         log(f"=== PROXY: GET {self.path} ===")
+        log(f"  Request Headers: {dict(self.headers)}")
         
         parsed = urllib.parse.urlparse(self.path)
         req_path = urllib.parse.unquote(parsed.path)
@@ -262,9 +266,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 with open(file_path, 'rb') as f:
                     file_data = f.read()
                 content_type = MIME_OVERRIDES.get(ext, mimetypes.guess_type(file_path)[0] or 'application/octet-stream')
-                self.send_response(200)
+                
+                total_size = len(file_data)
+                status_code = 200
+                range_header = self.headers.get('Range')
+                if range_header and range_header.startswith('bytes='):
+                    ranges = range_header[6:].split('-')
+                    start = int(ranges[0]) if ranges[0] else 0
+                    end = int(ranges[1]) if len(ranges) > 1 and ranges[1] else total_size - 1
+                    file_data = file_data[start:end+1]
+                    status_code = 206
+                
+                self.send_response(status_code)
                 self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(file_data)))
+                self.send_header('Connection', 'close')
+                if status_code == 206:
+                    self.send_header('Content-Range', f'bytes {start}-{end}/{total_size}')
                 self.send_header('Accept-Ranges', 'bytes')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
@@ -283,6 +301,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'audio/mpeg')
             self.send_header('Content-Length', str(len(silent_mp3)))
+            self.send_header('Connection', 'close')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             if not head_only:
