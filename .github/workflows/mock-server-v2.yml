@@ -175,8 +175,8 @@ jobs:
           $fixedCount = 0
           foreach ($f in $xmlFiles) {
             $xml = Get-Content $f.FullName -Raw
-            if ($xml -match 'dir=') {
-              $xml = $xml -replace 'dir="[^"]*"', ('dir="' + $dirValue + '"')
+            if ($xml -match '<(unit|level)[^>]*?dir=') {
+              $xml = $xml -replace '(<(?:unit|level)[^>]*?dir=")[^"]*(")', ("`$1" + $dirValue + "`$2")
               Set-Content -Path $f.FullName -Value $xml -NoNewline -Encoding UTF8
               $fixedCount++
             }
