@@ -169,7 +169,7 @@ jobs:
           
           # Fix exercise XML dir attribute for all files to use ../../ (relative to xml_us subfolders)
           Write-Host "=== Fixing exercise XML dir attribute (all XML files) ==="
-          $dirValue = "../../"
+          $dirValue = "https://student.mylexia.com/assets_a/"
           $appDataDir = "$env:APPDATA\com.lexiareading.core5.desktop.us\Local Store"
           $xmlFiles = Get-ChildItem -Path "$assetsDir\xml_us","$appDataDir\assets_a\xml_us" -Recurse -Filter "*.xml" -ErrorAction SilentlyContinue
           $fixedCount = 0
